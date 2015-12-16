@@ -61,7 +61,7 @@ int main(int argc, char** argv) {
     // Open the vg file
     std::ifstream vgStream(vgFile);
     if(!vgStream.good()) {
-        std::cerr << "Could not read " << vgFile1 << std::endl;
+        std::cerr << "Could not read " << vgFile << std::endl;
         exit(1);
     }
     
