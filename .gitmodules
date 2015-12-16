@@ -1,0 +1,3 @@
+[submodule "ekg/vg"]
+	path = ekg/vg
+	url = https://github.com/adamnovak/vg.git
