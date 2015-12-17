@@ -1,0 +1,30 @@
+{
+    "node": [
+        {"id": 1, "sequence": "GATTACA"},
+        {"id": 2, "sequence": "A"},
+        {"id": 3, "sequence": "C"},
+        {"id": 4, "sequence": "CATTAG"},
+        {"id": 5, "sequence": "ATTACAT"},
+        {"id": 6, "sequence": "CCCCC"}
+    ],
+    "edge": [
+        {"from": 1, "to": 2},
+        {"from": 2, "to": 4},
+        {"from": 1, "to": 3},
+        {"from": 3, "to": 4},
+        {"from": 4, "to": 5, "to_end": true},
+        {"from": 5, "to": 6, "from_start": true},
+        {"from": 4, "to": 6}
+    ],
+    "path": [
+        {
+            "name": "ref",
+            "mapping": [
+                {"position": {"node_id": 1}, "rank": 1},
+                {"position": {"node_id": 2}, "rank": 2},
+                {"position": {"node_id": 4}, "rank": 3},
+                {"position": {"node_id": 6}, "rank": 4}
+            ]
+        }
+    ]
+}

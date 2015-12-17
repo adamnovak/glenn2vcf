@@ -268,6 +268,11 @@ int main(int argc, char** argv) {
     while(std::getline(glennStream, line)) {
         // For each line
         
+        if(line == "") {
+            // Skip blank lines
+            continue;
+        }
+        
         // Make a stringstream to read out tokens
         std::stringstream tokens(line);
         
