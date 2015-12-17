@@ -320,7 +320,10 @@ int main(int argc, char** argv) {
             << std::endl;
     }
     
-    // Generate a vcf header
+    // Generate a vcf header. We can't make Variant records without a
+    // VariantCallFile, because the variants need to know which of their
+    // available info fields or whatever are defined in the file's header, so
+    // they know what to output.
     std::stringstream headerStream;
     // TODO: get sample name from file or a command line option.
     write_vcf_header(headerStream, "SAMPLE");
@@ -332,6 +335,10 @@ int main(int argc, char** argv) {
     
     // Spit out the header
     std::cout << headerStream.str();
+    
+    // Then go through it from the graph's point of view: first over alt nodes
+    // backending into the reference (creating things occupying ranges to which
+    // we can attribute copy number) and then over reference nodes.
     
     vg.for_each_node([&](vg::Node* node) {
         // Look at every node in the graph and spit out variants for the ones
@@ -556,15 +563,81 @@ int main(int argc, char** argv) {
         
     });
     
-    // Then go through it from the graph's point of view: first over alt nodes
-    // backending into the reference (creating things occupying ranges to which
-    // we can attribute copy number) and then over reference nodes.
-    
-    // We can't make Variant records without a VariantCallFile, because the
-    // variants need to know which of their available info fields or whatever
-    // are defined in the file's header, so they know what to output.
-    
+    vg.for_each_node([&](vg::Node* node) {
+        // Now we go through all the nodes on the reference path, and add in
+        // SNPs on them.
+        
+        // Ensure this node is nonreference
+        if(!referencePositionAndOrientation.count(node->id())) {
+            // Skip reference nodes
+            return;
+        }
+        
+        for(int i = 0; i < node->sequence().size(); i++) {
+            // For each position along the node, grab the call there.
+            auto& call = callsByNodeOffset[node->id()][i];
+            if(call.numberOfAlts == 0) {
+                // No variants here
+                continue;
+            }
+            // At least one alt is present here.
+            // Make the variant.
+            
+            // Make a Variant
+            vcflib::Variant variant;
+            variant.setVariantCallFile(vcf);
+            variant.quality = 0;
+            
+            // Work out where it is in the reference
+            size_t referencePosition = referencePositionAndOrientation.at(node->id()).first;
+            if(referencePositionAndOrientation.at(node->id()).second) {
+                // We're backward in the reference, so incrementing i goes
+                // towards the start, and i max gives us our noted reference
+                // position.
+                referencePosition += (node->sequence().size() - i - 1);
+            } else {
+                // We're forward in the reference, so incrementing i goes
+                // towards the end.
+                referencePosition += i;
+            }
+            
+            // Grab its reference base
+            std::string refAllele = char_to_string(refSeq[referencePosition]);
+            // Initialize the ref allele
+            create_ref_allele(variant, refAllele);
+            
+            // Add in alt bases, with the right orientation
+            for(int j = 0; j < call.numberOfAlts; j++) {
+                std::string altAllele = char_to_string(call.alts[j]);
+                if(referencePositionAndOrientation.at(node->id()).second) {
+                    // We need to flip the orientation to reference
+                    // orientation
+                    altAllele = vg::reverse_complement(altAllele);
+                }
+                // Add the novel SNP allele
+                add_alt_allele(variant, altAllele);
+            }
+            
+            // Set the variant position. Convert to 1-based.
+            variant.position = referencePosition + 1;
+            
+            std::cerr << "Found variant " << refAllele << " -> ";
+            for(int j = 0; j < call.numberOfAlts; j++) {
+                std::cerr << call.alts[j] << ",";
+            }
+            std::cerr << " on node " << node->id()
+                << " at 1-based reference position " << variant.position
+                << std::endl;
 
+            // TODO: determine if we're overlapping some other known alt,
+            // and look at whether the ref base is present, and determine a
+            // plausible copy number solution.
+                
+            // Output the created VCF variant.
+            std::cout << variant << std::endl;
+        }
+    });
+    
     return 0;
 }
 
