@@ -88,16 +88,19 @@ int main(int argc, char** argv) {
 
         int optionIndex = 0;
 
-        switch(getopt_long(argc, argv, "h", longOptions, &optionIndex)) {
+        char option = getopt_long(argc, argv, "h", longOptions, &optionIndex);
+        switch(option) {
         // Option value is in global optarg
+        case -1:
+            optionsRemaining = false;
+            break;
         case 'h': // When the user asks for help
         case '?': // When we get options we can't parse
             help_main(argv);
             exit(1);
             break;
         default:
-            // TODO: keep track of the option
-            std::cerr << "Illegal option" << std::endl;
+            std::cerr << "Illegal option: " << option << std::endl;
             exit(1);
         }
     }
@@ -180,6 +183,7 @@ int main(int argc, char** argv) {
         // Spit out a nonsense VCF line
         vcflib::Variant variant;
         variant.setVariantCallFile(vcf);
+        variant.quality = 0;
         
         // Initialize the ref allele
         create_ref_allele(variant, char_to_string(graphBase));
