@@ -83,6 +83,7 @@ std::string char_to_string(const char& letter) {
  */
 void write_vcf_header(std::ostream& stream, std::string sample_name) {
    stream << "##fileformat=VCFv4.2" << std::endl;
+   stream << "##ALT=<ID=NON_REF,Description=\"Represents any possible alternative allele at this location\">" << std::endl;
    stream << "##FORMAT=<ID=GT,Number=1,Type=Integer,Description=\"Genotype\">" << std::endl;
    stream << "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t" << sample_name << std::endl;
 }
@@ -141,6 +142,8 @@ void help_main(char** argv) {
         << std::endl
         << "options:" << std::endl
         << "    -r, --ref PATH      use the given path name as the reference path" << std::endl
+        << "    -g, --gvcf          include lines for non-variant positions" << std::endl
+        << "    -s, --sampe NAME    name the sample in the VCF with the given name" << std::endl
         << "    -h, --help          print this help message" << std::endl;
 }
 
@@ -157,24 +160,37 @@ int main(int argc, char** argv) {
     std::string refPathName = "ref";
     // What name should we use for the sample in the VCF file?
     std::string sampleName = "SAMPLE";
+    // Should we output lines for all the reference positions that do exist?
+    bool announceNonVariant = false;
     
     optind = 1; // Start at first real argument
     bool optionsRemaining = true;
     while(optionsRemaining) {
         static struct option longOptions[] = {
             {"ref", required_argument, 0, 'r'},
+            {"gvcf", no_argument, 0, 'g'},
+            {"sample", required_argument, 0, 's'},
             {"help", no_argument, 0, 'h'},
             {0, 0, 0, 0}
         };
 
         int optionIndex = 0;
 
-        char option = getopt_long(argc, argv, "r:h", longOptions, &optionIndex);
+        char option = getopt_long(argc, argv, "r:gs:h", longOptions, &optionIndex);
         switch(option) {
         // Option value is in global optarg
         case 'r':
             // Set the reference path name
             refPathName = optarg;
+            break;
+        case 'g':
+            // Say we need to announce non-variant ref positions
+            announceNonVariant = true;
+            break;
+        case 's':
+            // Set the sample name
+            sampleName = optarg;
+            break;
         case -1:
             optionsRemaining = false;
             break;
@@ -606,6 +622,7 @@ int main(int argc, char** argv) {
         
         // Make a Variant
         vcflib::Variant variant;
+        variant.sequenceName = refPathName;
         variant.setVariantCallFile(vcf);
         variant.quality = 0;
         
@@ -673,6 +690,15 @@ int main(int argc, char** argv) {
             return;
         }
         
+        // How many bases on this node are present?
+        size_t basesPresent = 0;
+        for(int i = 0; i < node->sequence().size(); i++) {
+            auto& call = callsByNodeOffset[node->id()][i];
+            if(call.graphBasePresent) {
+                basesPresent++;
+            }
+        }
+        
         for(int i = 0; i < node->sequence().size(); i++) {
             // Work out where it is in the reference
             size_t referencePosition = referencePositionAndOrientation.at(node->id()).first;
@@ -695,6 +721,7 @@ int main(int argc, char** argv) {
                 
                 // Make a Variant
                 vcflib::Variant variant;
+                variant.sequenceName = refPathName;
                 variant.setVariantCallFile(vcf);
                 variant.quality = 0;
                 
@@ -765,48 +792,63 @@ int main(int argc, char** argv) {
                 if(copynumberUsedByAlts[node->id()] < 2) {
                     // All the copy number we would expect to see hasn't been
                     // used up by alts bypassing this base. We need to say it's
-                    // deleted.
+                    // missing.
                     
-                    // TODO: we're using 1bp deletion alleles, but they have,
-                    // anchoring their alt versions, the bases being deleted by
-                    // adjacent one-base deletion alleles (or substitution
-                    // alleles) that might exist.
-                    
-                    // We need to work out what the ref (full length) and alt
-                    // (deleted) alleles will be.
+                    // We need to work out what the ref (present) and
+                    // alt (missing) alleles will be.
                     std::string refAllele;
                     std::string altAllele;
                     
-                    if(referencePosition == 0) {
-                        // TODO: special handling of deletion of the first base
+                    if(basesPresent == 0) {
+                        // The whole node is missing! And we don't know where it
+                        // went! Give a generic NON_REF GVCF answer.
                         
-                        // We can't delete the *only* base in VCF
-                        assert(refSeq.size() > 1);
-                        
-                        // We're replacing 2 bases, including the one after us,
-                        // with one base, which is just the one after us.
-                        
-                        // Grab its two reference bases
-                        refAllele = refSeq.substr(referencePosition, 2);
-                        
-                        // Grab its one alt base
-                        altAllele = refSeq.substr(referencePosition + 1, 1);
+                        refAllele = refSeq.substr(referencePosition, 1);
+                        altAllele = "<NON_REF>";
                         
                     } else {
-                    
-                        // We're replacing 2 bases, including the one before us,
-                        // with one base, which is just the one before us.
-                        referencePosition -= 1;
+                        // One or a few bases of the node are missing. Call them
+                        // as deletions.
                         
-                        // Grab its two reference bases
-                        refAllele = refSeq.substr(referencePosition, 2);
+                        // TODO: we're using 1bp deletion alleles, but they
+                        // have, anchoring their alt versions, the bases being
+                        // deleted by adjacent one-base deletion alleles (or
+                        // substitution alleles) that might exist.
                         
-                        // Grab its one alt base
-                        altAllele = refSeq.substr(referencePosition, 1);
+                        if(referencePosition == 0) {
+                            // Special handling of deletion of the first base
+                            
+                            // We can't delete the *only* base in VCF
+                            assert(refSeq.size() > 1);
+                            
+                            // We're replacing 2 bases, including the one after
+                            // us, with one base, which is just the one after
+                            // us.
+                            
+                            // Grab its two reference bases
+                            refAllele = refSeq.substr(referencePosition, 2);
+                            
+                            // Grab its one alt base
+                            altAllele = refSeq.substr(referencePosition + 1, 1);
+                            
+                        } else {
+                        
+                            // We're replacing 2 bases, including the one before
+                            // us, with one base, which is just the one before
+                            // us.
+                            referencePosition -= 1;
+                            
+                            // Grab its two reference bases
+                            refAllele = refSeq.substr(referencePosition, 2);
+                            
+                            // Grab its one alt base
+                            altAllele = refSeq.substr(referencePosition, 1);
+                        }
                     }
-                        
+                            
                     // Make a Variant
                     vcflib::Variant variant;
+                    variant.sequenceName = refPathName;
                     variant.setVariantCallFile(vcf);
                     variant.quality = 0;
                     
@@ -816,14 +858,53 @@ int main(int argc, char** argv) {
                     // Add the novel deletion allele
                     add_alt_allele(variant, altAllele);
                     
+                    // Say it's homozygous alt
+                    variant.format.push_back("GT");
+                    auto& genotype = variant.samples[sampleName]["GT"];
+                    genotype.push_back("1/1");
+                    
                     // Set the variant position. Convert to 1-based.
                     variant.position = referencePosition + 1;
                     
-                    std::cerr << "Found variant " << refAllele << " -> DEL"
-                        << " on node " << node->id()
+                    std::cerr << "Found variant " << refAllele << " -> "
+                        << altAllele << " on node " << node->id()
                         << " at 1-based reference position " << variant.position
                         << std::endl;
                         
+                    // Output the created VCF variant.
+                    std::cout << variant << std::endl;
+                    
+                }
+            } else {
+                // This base is present.
+                // Is that described in an alt? Or do we want to account for it now?
+                if(copynumberUsedByAlts[node->id()] == 0 && announceNonVariant) {
+                    // Nope. Nobody has ever heard of this reference base. We
+                    // need to talk about it.
+                    
+                    std::string refAllele = refSeq.substr(referencePosition, 1);
+                    std::string altAllele = "<NON_REF>";
+                    
+                    // Make a Variant
+                    vcflib::Variant variant;
+                    variant.sequenceName = refPathName;
+                    variant.setVariantCallFile(vcf);
+                    variant.quality = 0;
+                    
+                    // Initialize the ref allele
+                    create_ref_allele(variant, refAllele);
+                    
+                    // Add the novel deletion allele
+                    add_alt_allele(variant, altAllele);
+                    
+                    // Say it's homozygous ref
+                    variant.format.push_back("GT");
+                    auto& genotype = variant.samples[sampleName]["GT"];
+                    genotype.push_back("0/0");
+                    
+                    // Set the variant position. Convert to 1-based.
+                    variant.position = referencePosition + 1;
+                    
                     // Output the created VCF variant.
                     std::cout << variant << std::endl;
                 }
