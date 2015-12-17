@@ -155,6 +155,8 @@ int main(int argc, char** argv) {
     // Option variables
     // What's the name of the reference path in the graph?
     std::string refPathName = "ref";
+    // What name should we use for the sample in the VCF file?
+    std::string sampleName = "SAMPLE";
     
     optind = 1; // Start at first real argument
     bool optionsRemaining = true;
@@ -221,6 +223,13 @@ int main(int argc, char** argv) {
     // We're also going to build the reference sequence string
     std::stringstream refSeqStream;
     
+    // We also need to be able to map any given position in the reference to the
+    // NodeTraversal that lives there. We store a node under its lowest
+    // reference base number, turn the sort of the map backwards, and use
+    // lower_bound for the find (greatest element with key not greater than
+    // query). See <http://stackoverflow.com/a/529880>
+    std::map<size_t, vg::NodeTraversal, std::greater<size_t>> nodesByReference;
+    
     // What base are we at in the reference
     size_t referenceBase = 0;
     for(auto mapping : vg.paths.get_path(refPathName)) {
@@ -241,6 +250,11 @@ int main(int argc, char** argv) {
         
         // Add it to our idea of the reference string
         refSeqStream << sequence;
+        
+        // Say that this node appears here along the reference in this
+        // orientation.
+        nodesByReference[referenceBase] = vg::NodeTraversal(
+            vg.get_node(mapping.position().node_id()), mapping.is_reverse()); 
         
         // Whether we found the right place for this node in the reference or
         // not, we still need to advance along the reference path. We assume the
@@ -326,7 +340,7 @@ int main(int argc, char** argv) {
     // they know what to output.
     std::stringstream headerStream;
     // TODO: get sample name from file or a command line option.
-    write_vcf_header(headerStream, "SAMPLE");
+    write_vcf_header(headerStream, sampleName);
     
     // Load the headers into a new VCF file object
     vcflib::VariantCallFile vcf;
@@ -510,6 +524,50 @@ int main(int argc, char** argv) {
             // have one of it and one of a modified version of it.
         }
         
+        // Trace the reference between our in node and our out node.
+        size_t refPosition = referenceIntervalStart;
+        
+        // We want to know if the reference path opposite us is ever called as
+        // present or has a novel SNP. If so, since we're present, we know we
+        // must be heterozygous here. If not, we'll call ourselves homozygous
+        // here. TODO: catch conflicts between homozygous non-reference mutually
+        // exclusive variants.
+        // This is false by default; we assume it's missing and can be proven wrong.
+        // TODO: this makes us call insertions as homozygous.
+        bool refPathExists = false;
+        
+        while(refPosition < referenceIntervalPastEnd) {
+            // While we aren't at the start of the reference node that comes
+            // after this alt...
+            
+            // Get the node starting here in the reference. TODO: We don't
+            // really need the lower bound and the fancy map; we can know the
+            // reference start positions exactly.
+            auto refNodeResult = nodesByReference.lower_bound(refPosition);
+            
+            // It must exist
+            assert(refNodeResult != nodesByReference.end());
+            
+            // Grab the actual node
+            vg::Node* refNode = (*refNodeResult).second.node;
+            
+            // We know we can iterate over the whole reference node, because it
+            // must start immediatelty after the previous node ends.
+            for(int i = 0; i < refNode->sequence().size(); i++) {
+                // See if the reference node is ever called as absent with no
+                // novel SNP alt.
+                auto& call = callsByNodeOffset[refNode->id()][i];
+                if(call.graphBasePresent || call.numberOfAlts > 0) {
+                    // We found evidence the reference exists in alternation
+                    // with this allele.
+                    refPathExists = true;
+                }
+            }
+            
+            // Advance to the start of the next reference node
+            refPosition += refNode->sequence().size();
+        }
+        
         // Make a Variant
         vcflib::Variant variant;
         variant.setVariantCallFile(vcf);
@@ -546,18 +604,27 @@ int main(int argc, char** argv) {
         
         // Add the graph version
         add_alt_allele(variant, altAllele);
+        
+        // Say we're going to spit out the genotype for this sample.        
+        variant.format.push_back("GT");
+        variant.outputSampleNames.push_back(sampleName);
+        auto& genotype = variant.samples[sampleName]["GT"];
+        
+        // Make it hom/het as appropriate
+        if(refPathExists) {
+            // We're allele 1 (alt) and allele 2 (ref) heterozygous.
+            genotype.push_back("1/0");
+        } else {
+            // We're allele 1 (alt) homozygous, other overlapping variants
+            // notwithstanding.
+            genotype.push_back("1/1");
+        }
 
         std::cerr << "Found variant " << refAllele << " -> " << altAllele
             << " caused by node " << altNode.node->id()
             << " at 1-based reference position " << variant.position
             << std::endl;
 
-        // TODO: determine hom/het based on whether the ref path (or some other
-        // alt path?) is also called as present.
-        
-        // TODO: trace along the ref path between the entry and exit nodes in
-        // order to do that (and to get the sequence?)
-            
         // Output the created VCF variant.
         std::cout << variant << std::endl;
         
@@ -621,6 +688,34 @@ int main(int argc, char** argv) {
             // Set the variant position. Convert to 1-based.
             variant.position = referencePosition + 1;
             
+            // Say we're going to spit out the genotype for this sample.        
+            variant.format.push_back("GT");
+            variant.outputSampleNames.push_back(sampleName);
+            auto& genotype = variant.samples[sampleName]["GT"];
+            
+            // Make it hom/het as appropriate
+            if(call.graphBasePresent) {
+                // We have the ref and, since we have a variant, we also have
+                // the alt.
+                genotype.push_back("1/0");
+            } else if(call.numberOfAlts == 1) {
+                // We have only one alt allele, and no reference. TODO: are we
+                // really in alternation with a known alt path that took some of
+                // our copy number?
+                genotype.push_back("1/1");
+            } else if(call.numberOfAlts == 2) {
+                // We have two alt alleles and no reference. We must have both
+                // present.
+                genotype.push_back("1/2");
+            } else {
+                // This should never happen
+                throw std::runtime_error("Semantically invalid BaseCall");
+            }
+
+            // TODO: determine if we're overlapping some other known alt that's
+            // called as present, and call heterozygous alt/ref if we have no
+            // ref present and just one alt.
+            
             std::cerr << "Found variant " << refAllele << " -> ";
             for(int j = 0; j < call.numberOfAlts; j++) {
                 std::cerr << call.alts[j] << ",";
@@ -628,10 +723,7 @@ int main(int argc, char** argv) {
             std::cerr << " on node " << node->id()
                 << " at 1-based reference position " << variant.position
                 << std::endl;
-
-            // TODO: determine if we're overlapping some other known alt,
-            // and look at whether the ref base is present, and determine a
-            // plausible copy number solution.
+                
                 
             // Output the created VCF variant.
             std::cout << variant << std::endl;
