@@ -12,6 +12,18 @@
 #include "ekg/vg/vcflib/src/Variant.h"
 
 /**
+ * Represents our opinion of a particular base in a node in the graph.
+ */
+struct BaseCall {
+    // Is the default base here peresnt?
+    bool graphBasePresent = true;
+    // How many alts are here?
+    char numberOfAlts = 0;
+    // What are the actual alt bases?
+    char[2] alts;
+}
+
+/**
  * Make a letter into a full string because apparently that's too fancy for the
  * standard library.
  */
@@ -128,6 +140,17 @@ int main(int argc, char** argv) {
     
     // Open up the Glenn-file
     std::ifstream glennStream(glennFile);
+    
+    // Parse it into an internal format, where we keep track of whether bases
+    // exist or not.
+    // Stores call info for a position by graph node and index in the node.    
+    std::map<int64_t, std::vector<BaseCall>> callsByNodeOffset;
+    
+    // TODO: fill that in
+    
+    // Then go through it from the graph's point of view: first over alt nodes
+    // backending into the reference (creating things occupying ranges to which
+    // we can attribute copy number) and then over reference nodes.
     
     // We can't make Variant records without a VariantCallFile, because the
     // variants need to know which of their available info fields or whatever
