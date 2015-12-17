@@ -354,6 +354,9 @@ int main(int argc, char** argv) {
     // backending into the reference (creating things occupying ranges to which
     // we can attribute copy number) and then over reference nodes.
     
+    // We need to track the bases lost.
+    size_t basesLost = 0;
+    
     vg.for_each_node([&](vg::Node* node) {
         // Look at every node in the graph and spit out variants for the ones
         // that are non-reference, but attach to two reference nodes and are
@@ -362,6 +365,47 @@ int main(int argc, char** argv) {
         // Ensure this node is nonreference
         if(referencePositionAndOrientation.count(node->id())) {
             // Skip reference nodes
+            return;
+        }
+        
+        // Determine how many bases of this node are present.
+        size_t graphBasesPresent = 0;
+        // Determine how many alt calls on the node are also present.
+        int totalAltsPresent = 0;
+        for(auto& call : callsByNodeOffset[node->id()]) {
+            // For every base in the node, note if it's graph base is present.
+            graphBasesPresent += call.graphBasePresent;
+            
+            // And note how many alts are also present.
+            totalAltsPresent += call.numberOfAlts;
+        }
+        
+        if(totalAltsPresent > 0) {
+            // This node is present, but it has alts we should call on it and
+            // won't.
+            std::cerr << "Node " << node->id() <<" has " << totalAltsPresent << " bp additional novel alts!" << std::endl;
+                
+            // TODO: we leave the node in, because at least one copy of it
+            // exists, but we might end up calling it homozygous when really we
+            // have one of it and one of a modified version of it.
+            // We lose these extra alt bases no matter what happens now.
+            basesLost += totalAltsPresent;
+        }
+        
+        if(graphBasesPresent == 0) {
+            // This node isn't used at all in this sample, so ignore it.
+            // We lose alts if it somehow had any.
+            return;
+        }
+        
+        if(graphBasesPresent < node->sequence().size()) {
+            // We shouldn't call this as a variant; they're not even
+            // heterozygous this alt.
+            std::cerr << "Node " << node->id() << " is but only "
+                << graphBasesPresent << "/" << node->sequence().size()
+                << " present. Skipping!" << std::endl;
+            // We lose the bases that were there.
+            basesLost += graphBasesPresent;
             return;
         }
         
@@ -425,6 +469,8 @@ int main(int argc, char** argv) {
         if(leftmostInNode.node == nullptr || leftmostOutNode.node == nullptr) {
             // We're missing a reference node on one side.
             std::cerr << "Node " << node->id() << " not anchored to reference." << std::endl;
+            // We lose the bases we wanted to represent.
+            basesLost += graphBasesPresent;
             return;
         }
         
@@ -442,6 +488,8 @@ int main(int argc, char** argv) {
             // Going through this node would cause us to invert the direction
             // we're traversing the reference in.
             std::cerr << "Node " << node->id() << " inverts reference path." << std::endl;
+            // We lose the bases we wanted to represent.
+            basesLost += graphBasesPresent;
             return;
         }
         
@@ -469,6 +517,8 @@ int main(int argc, char** argv) {
             // We're perfectly fine, orientation-wise, except we let you time
             // travel and leave before you arrived.
             std::cerr << "Node " << node->id() << " allows duplication." << std::endl;
+            // We lose the bases we wanted to represent.
+            basesLost += graphBasesPresent;
             return;
         }
         
@@ -481,48 +531,6 @@ int main(int argc, char** argv) {
         assert(referenceIntervalPastEnd >= referenceIntervalStart);
         // How long is this interval in the reference?
         size_t referenceIntervalSize = referenceIntervalPastEnd - referenceIntervalStart;
-        
-        // Determine if this node is present throughout
-        bool nodeFullyPresent = true;
-        // And if any of it is present at all
-        bool nodePartlyPresent = false;
-        // Determine how many alt calls on the node are also present. TODO:
-        // since we aren't going to list these as variants, should we just
-        // ignore them?
-        int maxAltsPresent = 0;
-        for(auto& call : callsByNodeOffset[node->id()]) {
-            // For every base in the node, note if it's graph base is present.
-            nodeFullyPresent = nodeFullyPresent && call.graphBasePresent;
-            nodePartlyPresent = nodePartlyPresent || call.graphBasePresent;
-            
-            // And note how many alts are also present.
-            maxAltsPresent = std::max(maxAltsPresent, (int)call.numberOfAlts);
-        }
-        
-        if(!nodePartlyPresent) {
-            // This node isn't used at all in this sample, so ignore it.
-            return;
-        }
-        
-        if(nodePartlyPresent && !nodeFullyPresent) {
-            // We shouldn't call this as a variant; they're not even
-            // heterozygous this alt.
-            std::cerr << "Node " << node->id() <<" is nonreference attached to "
-                << "reference, but only partially present. Skipping!"
-                << std::endl;
-            return;
-        }
-        
-        if(maxAltsPresent > 0) {
-            // This node is present, but it has alts we should call on it and
-            // won't.
-            std::cerr << "Node " << node->id() <<" is nonreference attached to "
-                << "reference, and present, but has additional novel alts!"
-                << std::endl;
-            // TODO: we leave the node in, because at least one copy of it
-            // exists, but we might end up calling it homozygous when really we
-            // have one of it and one of a modified version of it.
-        }
         
         // Trace the reference between our in node and our out node.
         size_t refPosition = referenceIntervalStart;
@@ -607,7 +615,6 @@ int main(int argc, char** argv) {
         
         // Say we're going to spit out the genotype for this sample.        
         variant.format.push_back("GT");
-        variant.outputSampleNames.push_back(sampleName);
         auto& genotype = variant.samples[sampleName]["GT"];
         
         // Make it hom/het as appropriate
@@ -634,9 +641,8 @@ int main(int argc, char** argv) {
         // Now we go through all the nodes on the reference path, and add in
         // SNPs on them.
         
-        // Ensure this node is nonreference
         if(!referencePositionAndOrientation.count(node->id())) {
-            // Skip reference nodes
+            // Skip non-reference nodes
             return;
         }
         
@@ -690,7 +696,6 @@ int main(int argc, char** argv) {
             
             // Say we're going to spit out the genotype for this sample.        
             variant.format.push_back("GT");
-            variant.outputSampleNames.push_back(sampleName);
             auto& genotype = variant.samples[sampleName]["GT"];
             
             // Make it hom/het as appropriate
@@ -729,6 +734,9 @@ int main(int argc, char** argv) {
             std::cout << variant << std::endl;
         }
     });
+    
+    // Announce how much we can't show.
+    std::cerr << "Had to drop " << basesLost << " bp of unrepresentable variation." << std::endl;
     
     return 0;
 }
