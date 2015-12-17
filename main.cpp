@@ -255,6 +255,10 @@ int main(int argc, char** argv) {
     // Announce progress.
     std::cerr << "Traced " << referenceBase << " bp reference path " << refPathName << "." << std::endl;
     
+    if(refSeq.size() < 100) {
+        std::cerr << "Reference sequence: " << refSeq << std::endl;
+    }
+    
     // Open up the Glenn-file
     std::ifstream glennStream(glennFile);
     
@@ -302,14 +306,18 @@ int main(int argc, char** argv) {
         
         // Fill in the callsByNodeOffset map for this base of this node.
         
-        if(callsByNodeOffset[nodeId].size() <= graphBase) {
+        if(callsByNodeOffset[nodeId].size() <= offset) {
             // Make sure there's room in the vector
-            callsByNodeOffset[nodeId].resize(graphBase + 1);
+            callsByNodeOffset[nodeId].resize(offset + 1);
         }
         
         // Interpret the meaning of the -,. or A,C type character pairs that
         // Glenn is using.
-        callsByNodeOffset[nodeId][graphBase] = BaseCall(callCharacters);
+        callsByNodeOffset[nodeId][offset] = BaseCall(callCharacters);
+        
+        std::cerr << "Node " << nodeId << " base " << offset << " status: "
+            << (callsByNodeOffset[nodeId][offset].graphBasePresent ? "Present" : "Absent")
+            << std::endl;
     }
     
     // Generate a vcf header
@@ -470,6 +478,11 @@ int main(int argc, char** argv) {
             maxAltsPresent = std::max(maxAltsPresent, (int)call.numberOfAlts);
         }
         
+        if(!nodePartlyPresent) {
+            // This node isn't used at all in this sample, so ignore it.
+            return;
+        }
+        
         if(nodePartlyPresent && !nodeFullyPresent) {
             // We shouldn't call this as a variant; they're not even
             // heterozygous this alt.
@@ -489,7 +502,7 @@ int main(int argc, char** argv) {
             // exists, but we might end up calling it homozygous when really we
             // have one of it and one of a modified version of it.
         }
-    
+        
         // Make a Variant
         vcflib::Variant variant;
         variant.setVariantCallFile(vcf);
@@ -498,7 +511,11 @@ int main(int argc, char** argv) {
         // Pull out the string for the reference allele
         std::string refAllele = refSeq.substr(referenceIntervalStart, referenceIntervalSize);
         // And for the alt allele
-        std::string altAllele = node->sequence();
+        std::string altAllele = altNode.node->sequence();
+        if(altNode.backward) {
+            // If the node is traversed backward, we need to flip its sequence.
+            altAllele = vg::reverse_complement(altAllele);
+        }
         
         if(refAllele.size() == 0) {
             // Shift everybody left by 1 base for the anchoring base that VCF
@@ -524,7 +541,9 @@ int main(int argc, char** argv) {
         add_alt_allele(variant, altAllele);
 
         std::cerr << "Found variant " << refAllele << " -> " << altAllele
-            << " at 1-based position " << variant.position << std::endl;
+            << " caused by node " << altNode.node->id()
+            << " at 1-based reference position " << variant.position
+            << std::endl;
 
         // TODO: determine hom/het based on whether the ref path (or some other
         // alt path?) is also called as present.
