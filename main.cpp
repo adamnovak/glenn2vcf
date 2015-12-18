@@ -351,11 +351,29 @@ int main(int argc, char** argv) {
         // Interpret the meaning of the -,. or A,C type character pairs that
         // Glenn is using.
         callsByNodeOffset[nodeId][offset] = BaseCall(callCharacters);
-        
+
+#ifdef debug
         std::cerr << "Node " << nodeId << " base " << offset << " status: "
             << (callsByNodeOffset[nodeId][offset].graphBasePresent ? "Present" : "Absent")
             << std::endl;
+#endif
     }
+    
+    
+    vg.for_each_node([&](vg::Node* node) {
+        // Make sure we have all the calls we need (one per base)
+        if(!callsByNodeOffset.count(node->id())) {
+            // This node isn't called. Complain and compensate.
+            std::cerr << "WARNING: Uncalled node: " << std::to_string(node->id()) << std::endl;
+            callsByNodeOffset[node->id()].resize(node->sequence().size());
+        }
+        
+        if(callsByNodeOffset[node->id()].size() != node->sequence().size()) {
+            // All nodes are called to sufficient length
+            std::cerr << "WARNING: Calls for node are too short: " << std::to_string(node->id()) << std::endl;
+            callsByNodeOffset[node->id()].resize(node->sequence().size());
+        }
+    });
     
     // Generate a vcf header. We can't make Variant records without a
     // VariantCallFile, because the variants need to know which of their
@@ -583,6 +601,7 @@ int main(int argc, char** argv) {
             for(int i = 0; i < refNode->sequence().size(); i++) {
                 // See if the reference node is ever called as absent with no
                 // novel SNP alt.
+                
                 auto& call = callsByNodeOffset[refNode->id()][i];
                 if(call.graphBasePresent || call.numberOfAlts > 0) {
                     // We found evidence the reference exists in alternation
@@ -699,22 +718,34 @@ int main(int argc, char** argv) {
             }
         }
         
+        // This gets set if there's a running deletion of several bases in a row
+        // from a ref node that is otherwise present. It makes it less obvious
+        // that you can't just declare a deletion without considering the
+        // surrounding bases (we still might say G -> C and GATTTT -> G about
+        // the same G).
+        int64_t runningDelStart = -1;
+        
         for(int i = 0; i < node->sequence().size(); i++) {
+            // Are we continuing a running deletion?
+            bool runningDelContinues = false;
+        
+            // Where are we in node local coordinates?
+            int positionOnNode;
+        
             // Work out where it is in the reference
-            size_t referencePosition = referencePositionAndOrientation.at(node->id()).first;
+            size_t referencePosition = referencePositionAndOrientation.at(node->id()).first + i;
             if(referencePositionAndOrientation.at(node->id()).second) {
                 // We're backward in the reference, so incrementing i goes
-                // towards the start, and i max gives us our noted reference
-                // position.
-                referencePosition += (node->sequence().size() - i - 1);
+                // towards the node's index 0
+                positionOnNode = (node->sequence().size() - i - 1);
             } else {
                 // We're forward in the reference, so incrementing i goes
-                // towards the end.
-                referencePosition += i;
+                // towards the node's max index.
+                positionOnNode = i;
             }
         
             // For each position along the node, grab the call there.
-            auto& call = callsByNodeOffset[node->id()][i];
+            auto& call = callsByNodeOffset[node->id()][positionOnNode];
             if(call.numberOfAlts > 0) {
                 // At least one alt is present here.
                 // Make the variant.
@@ -776,7 +807,7 @@ int main(int argc, char** argv) {
                     throw std::runtime_error("Semantically invalid BaseCall");
                 }
 
-                std::cerr << "Found variant " << refAllele << " -> ";
+                std::cerr << "Found  alt-bearing variant " << refAllele << " -> ";
                 for(int j = 0; j < call.numberOfAlts; j++) {
                     std::cerr << call.alts[j] << ",";
                 }
@@ -794,86 +825,57 @@ int main(int argc, char** argv) {
                     // used up by alts bypassing this base. We need to say it's
                     // missing.
                     
-                    // We need to work out what the ref (present) and
-                    // alt (missing) alleles will be.
-                    std::string refAllele;
-                    std::string altAllele;
-                    
                     if(basesPresent == 0) {
                         // The whole node is missing! And we don't know where it
                         // went! Give a generic NON_REF GVCF answer.
                         
-                        refAllele = refSeq.substr(referencePosition, 1);
-                        altAllele = "<NON_REF>";
+                        
+                        // We need to work out what the ref (present) and
+                        // alt (missing) alleles will be.
+                        std::string refAllele = refSeq.substr(referencePosition, 1);
+                        std::string altAllele = "<NON_REF>";
+                        
+                        // Make a Variant
+                        vcflib::Variant variant;
+                        variant.sequenceName = refPathName;
+                        variant.setVariantCallFile(vcf);
+                        variant.quality = 0;
+                        
+                        // Initialize the ref allele
+                        create_ref_allele(variant, refAllele);
+                        
+                        // Add the novel deletion allele
+                        add_alt_allele(variant, altAllele);
+                        
+                        // Say it's homozygous alt
+                        variant.format.push_back("GT");
+                        auto& genotype = variant.samples[sampleName]["GT"];
+                        genotype.push_back("1/1");
+                        
+                        // Set the variant position. Convert to 1-based.
+                        variant.position = referencePosition + 1;
+                        
+                        std::cerr << "Found NR variant " << refAllele << " -> "
+                            << altAllele << " on node " << node->id()
+                            << " at 1-based reference position " << variant.position
+                            << std::endl;
+                            
+                        // Output the created VCF variant.
+                        std::cout << variant << std::endl;
                         
                     } else {
                         // One or a few bases of the node are missing. Call them
                         // as deletions.
                         
-                        // TODO: we're using 1bp deletion alleles, but they
-                        // have, anchoring their alt versions, the bases being
-                        // deleted by adjacent one-base deletion alleles (or
-                        // substitution alleles) that might exist.
-                        
-                        if(referencePosition == 0) {
-                            // Special handling of deletion of the first base
-                            
-                            // We can't delete the *only* base in VCF
-                            assert(refSeq.size() > 1);
-                            
-                            // We're replacing 2 bases, including the one after
-                            // us, with one base, which is just the one after
-                            // us.
-                            
-                            // Grab its two reference bases
-                            refAllele = refSeq.substr(referencePosition, 2);
-                            
-                            // Grab its one alt base
-                            altAllele = refSeq.substr(referencePosition + 1, 1);
-                            
-                        } else {
-                        
-                            // We're replacing 2 bases, including the one before
-                            // us, with one base, which is just the one before
-                            // us.
-                            referencePosition -= 1;
-                            
-                            // Grab its two reference bases
-                            refAllele = refSeq.substr(referencePosition, 2);
-                            
-                            // Grab its one alt base
-                            altAllele = refSeq.substr(referencePosition, 1);
+                        if(runningDelStart == -1) {
+                            // Start a new deletion here. Note that here may be
+                            // base 0.
+                            runningDelStart = referencePosition;
                         }
+                        // Otherwise we get used by the running del
+                        runningDelContinues = true;
                     }
                             
-                    // Make a Variant
-                    vcflib::Variant variant;
-                    variant.sequenceName = refPathName;
-                    variant.setVariantCallFile(vcf);
-                    variant.quality = 0;
-                    
-                    // Initialize the ref allele
-                    create_ref_allele(variant, refAllele);
-                    
-                    // Add the novel deletion allele
-                    add_alt_allele(variant, altAllele);
-                    
-                    // Say it's homozygous alt
-                    variant.format.push_back("GT");
-                    auto& genotype = variant.samples[sampleName]["GT"];
-                    genotype.push_back("1/1");
-                    
-                    // Set the variant position. Convert to 1-based.
-                    variant.position = referencePosition + 1;
-                    
-                    std::cerr << "Found variant " << refAllele << " -> "
-                        << altAllele << " on node " << node->id()
-                        << " at 1-based reference position " << variant.position
-                        << std::endl;
-                        
-                    // Output the created VCF variant.
-                    std::cout << variant << std::endl;
-                    
                 }
             } else {
                 // This base is present.
@@ -909,7 +911,131 @@ int main(int argc, char** argv) {
                     std::cout << variant << std::endl;
                 }
             }
+            
+            if(runningDelStart != -1 && !runningDelContinues) {
+                // We're right after the end of a running deletion.
+                
+                // How many bases were deleted?
+                size_t runningDelLength = referencePosition - runningDelStart;
+                
+                std::cerr << "Running del length " << runningDelLength << " internal to node." << std::endl;
+                
+                std::string refAllele;
+                std::string altAllele;
+                
+               
+                
+                if(runningDelStart == 0) {
+                    // Special handling of deletion of the first base
+                    
+                    // Grab its n reference bases
+                    refAllele = refSeq.substr(runningDelStart, runningDelLength + 1);
+                    
+                    // Grab its one alt base
+                    altAllele = refSeq.substr(referencePosition, 1);
+                    
+                } else {
+                
+                    // We want the ref allele to start a base early and include
+                    // the base before the deleted bases.
+                    runningDelStart -= 1;
+                    
+                    // Grab its two reference bases
+                    refAllele = refSeq.substr(runningDelStart, runningDelLength + 1);
+                    
+                    // Grab its one alt base
+                    altAllele = refSeq.substr(runningDelStart, 1);
+                }
+                
+                
+                // Make a Variant
+                vcflib::Variant variant;
+                variant.sequenceName = refPathName;
+                variant.setVariantCallFile(vcf);
+                variant.quality = 0;
+                
+                // Initialize the ref allele
+                create_ref_allele(variant, refAllele);
+                
+                // Add the novel deletion allele
+                add_alt_allele(variant, altAllele);
+                
+                // Say it's homozygous deleted for the whole run.
+                variant.format.push_back("GT");
+                auto& genotype = variant.samples[sampleName]["GT"];
+                genotype.push_back("1/1");
+                
+                // Set the variant position. Convert to 1-based.
+                variant.position = runningDelStart + 1;
+                
+                std::cerr << "Found variant " << refAllele << " -> "
+                    << altAllele << " on node " << node->id()
+                    << " at 1-based reference position " << variant.position
+                    << std::endl;
+                    
+                std::cout << variant << std::endl;
+                    
+                // Clear the running deletion
+                runningDelStart = -1;
+                
+            }
         }
+        
+        // We're now at the 1-past-the-end position on the node.
+        if(runningDelStart != -1) {
+            // We were deleting up to the end of the node.
+            
+            // We know we didn't delete the whole node, no need to check for pos
+            // 0 in ref.
+            
+            // How many bases were deleted? It's the end ref position of the
+            // node minus the ref position where the del started.
+            size_t runningDelLength = (referencePositionAndOrientation.at(node->id()).first +
+                node->sequence().size() - runningDelStart);
+                
+            std::cerr << "Running del length " << runningDelLength << " at end of node." << std::endl;
+            
+            // We want the ref allele to start a base early and include
+            // the base before the deleted bases.
+            runningDelStart -= 1;
+            
+            // Grab its two reference bases
+            std::string refAllele = refSeq.substr(runningDelStart, runningDelLength + 1);
+            
+            // Grab its one alt base
+            std::string altAllele = refSeq.substr(runningDelStart, 1);
+            
+            // Make a Variant
+            vcflib::Variant variant;
+            variant.sequenceName = refPathName;
+            variant.setVariantCallFile(vcf);
+            variant.quality = 0;
+            
+            // Initialize the ref allele
+            create_ref_allele(variant, refAllele);
+            
+            // Add the novel deletion allele
+            add_alt_allele(variant, altAllele);
+            
+            // Say it's homozygous deleted for the whole run.
+            variant.format.push_back("GT");
+            auto& genotype = variant.samples[sampleName]["GT"];
+            genotype.push_back("1/1");
+            
+            // Set the variant position. Convert to 1-based.
+            variant.position = runningDelStart + 1;
+            
+            std::cerr << "Found variant " << refAllele << " -> "
+                << altAllele << " on node " << node->id()
+                << " at 1-based reference position " << variant.position
+                << std::endl;
+                
+            std::cout << variant << std::endl;
+                
+            // Clear the running deletion
+            runningDelStart = -1;
+        }
+        
     });
     
     // Announce how much we can't show.
