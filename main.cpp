@@ -13,6 +13,12 @@
 #include "ekg/vg/index.hpp"
 #include "ekg/vg/vcflib/src/Variant.h"
 
+// Note: THIS CODE IS TERRIBLE
+// TODO:
+//  - Decide if we need to have sibling alts detect (somehow) and coordinate with each other
+//  - Parallelize variant generation
+//  - Make variant stamping out some kind of function, don't duplicate the same variant construction code 6 times
+
 /**
  * Represents our opinion of a particular base in a node in the graph.
  */
@@ -144,6 +150,7 @@ void help_main(char** argv) {
         << "    -r, --ref PATH      use the given path name as the reference path" << std::endl
         << "    -g, --gvcf          include lines for non-variant positions" << std::endl
         << "    -s, --sampe NAME    name the sample in the VCF with the given name" << std::endl
+        << "    -o, --offset INT    offset variant positions by this amount" << std::endl
         << "    -h, --help          print this help message" << std::endl;
 }
 
@@ -162,6 +169,8 @@ int main(int argc, char** argv) {
     std::string sampleName = "SAMPLE";
     // Should we output lines for all the reference positions that do exist?
     bool announceNonVariant = false;
+    // How far should we offset positions of variants?
+    int64_t variantOffset = 0;
     
     optind = 1; // Start at first real argument
     bool optionsRemaining = true;
@@ -170,13 +179,14 @@ int main(int argc, char** argv) {
             {"ref", required_argument, 0, 'r'},
             {"gvcf", no_argument, 0, 'g'},
             {"sample", required_argument, 0, 's'},
+            {"offset", required_argument, 0, 'o'},
             {"help", no_argument, 0, 'h'},
             {0, 0, 0, 0}
         };
 
         int optionIndex = 0;
 
-        char option = getopt_long(argc, argv, "r:gs:h", longOptions, &optionIndex);
+        char option = getopt_long(argc, argv, "r:gs:o:h", longOptions, &optionIndex);
         switch(option) {
         // Option value is in global optarg
         case 'r':
@@ -190,6 +200,10 @@ int main(int argc, char** argv) {
         case 's':
             // Set the sample name
             sampleName = optarg;
+            break;
+        case 'o':
+            // Offset variants
+            variantOffset = std::stoll(optarg);
             break;
         case -1:
             optionsRemaining = false;
@@ -669,7 +683,7 @@ int main(int argc, char** argv) {
         // deletions
         
         // Set the variant position. Convert to 1-based.
-        variant.position = referenceIntervalStart + 1;
+        variant.position = referenceIntervalStart + 1 + variantOffset;
         
         // Initialize the ref allele
         create_ref_allele(variant, refAllele);
@@ -774,7 +788,7 @@ int main(int argc, char** argv) {
                 }
                 
                 // Set the variant position. Convert to 1-based.
-                variant.position = referencePosition + 1;
+                variant.position = referencePosition + 1 + variantOffset;
                 
                 // Say we're going to spit out the genotype for this sample.        
                 variant.format.push_back("GT");
@@ -853,7 +867,7 @@ int main(int argc, char** argv) {
                         genotype.push_back("1/1");
                         
                         // Set the variant position. Convert to 1-based.
-                        variant.position = referencePosition + 1;
+                        variant.position = referencePosition + 1 + variantOffset;
                         
                         std::cerr << "Found NR variant " << refAllele << " -> "
                             << altAllele << " on node " << node->id()
@@ -905,7 +919,7 @@ int main(int argc, char** argv) {
                     genotype.push_back("0/0");
                     
                     // Set the variant position. Convert to 1-based.
-                    variant.position = referencePosition + 1;
+                    variant.position = referencePosition + 1 + variantOffset;
                     
                     // Output the created VCF variant.
                     std::cout << variant << std::endl;
@@ -966,7 +980,7 @@ int main(int argc, char** argv) {
                 genotype.push_back("1/1");
                 
                 // Set the variant position. Convert to 1-based.
-                variant.position = runningDelStart + 1;
+                variant.position = runningDelStart + 1 + variantOffset;
                 
                 std::cerr << "Found variant " << refAllele << " -> "
                     << altAllele << " on node " << node->id()
@@ -1023,7 +1037,7 @@ int main(int argc, char** argv) {
             genotype.push_back("1/1");
             
             // Set the variant position. Convert to 1-based.
-            variant.position = runningDelStart + 1;
+            variant.position = runningDelStart + 1 + variantOffset;
             
             std::cerr << "Found variant " << refAllele << " -> "
                 << altAllele << " on node " << node->id()
