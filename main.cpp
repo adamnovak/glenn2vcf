@@ -148,6 +148,7 @@ void help_main(char** argv) {
         << std::endl
         << "options:" << std::endl
         << "    -r, --ref PATH      use the given path name as the reference path" << std::endl
+        << "    -c, --contig NAME   use the given name as the VCF contig name" << std::endl
         << "    -g, --gvcf          include lines for non-variant positions" << std::endl
         << "    -s, --sampe NAME    name the sample in the VCF with the given name" << std::endl
         << "    -o, --offset INT    offset variant positions by this amount" << std::endl
@@ -165,6 +166,8 @@ int main(int argc, char** argv) {
     // Option variables
     // What's the name of the reference path in the graph?
     std::string refPathName = "ref";
+    // What name should we give the contig in the VCF file?
+    std::string contigName = ".";
     // What name should we use for the sample in the VCF file?
     std::string sampleName = "SAMPLE";
     // Should we output lines for all the reference positions that do exist?
@@ -177,6 +180,7 @@ int main(int argc, char** argv) {
     while(optionsRemaining) {
         static struct option longOptions[] = {
             {"ref", required_argument, 0, 'r'},
+            {"contig", required_argument, 0, 'c'},
             {"gvcf", no_argument, 0, 'g'},
             {"sample", required_argument, 0, 's'},
             {"offset", required_argument, 0, 'o'},
@@ -192,6 +196,10 @@ int main(int argc, char** argv) {
         case 'r':
             // Set the reference path name
             refPathName = optarg;
+            break;
+        case 'c':
+            // Set the contig name
+            contigName = optarg;
             break;
         case 'g':
             // Say we need to announce non-variant ref positions
@@ -655,7 +663,7 @@ int main(int argc, char** argv) {
         
         // Make a Variant
         vcflib::Variant variant;
-        variant.sequenceName = refPathName;
+        variant.sequenceName = contigName;
         variant.setVariantCallFile(vcf);
         variant.quality = 0;
         
@@ -766,7 +774,7 @@ int main(int argc, char** argv) {
                 
                 // Make a Variant
                 vcflib::Variant variant;
-                variant.sequenceName = refPathName;
+                variant.sequenceName = contigName;
                 variant.setVariantCallFile(vcf);
                 variant.quality = 0;
                 
@@ -851,7 +859,7 @@ int main(int argc, char** argv) {
                         
                         // Make a Variant
                         vcflib::Variant variant;
-                        variant.sequenceName = refPathName;
+                        variant.sequenceName = contigName;
                         variant.setVariantCallFile(vcf);
                         variant.quality = 0;
                         
@@ -903,7 +911,7 @@ int main(int argc, char** argv) {
                     
                     // Make a Variant
                     vcflib::Variant variant;
-                    variant.sequenceName = refPathName;
+                    variant.sequenceName = contigName;
                     variant.setVariantCallFile(vcf);
                     variant.quality = 0;
                     
@@ -964,7 +972,7 @@ int main(int argc, char** argv) {
                 
                 // Make a Variant
                 vcflib::Variant variant;
-                variant.sequenceName = refPathName;
+                variant.sequenceName = contigName;
                 variant.setVariantCallFile(vcf);
                 variant.quality = 0;
                 
@@ -1021,7 +1029,7 @@ int main(int argc, char** argv) {
             
             // Make a Variant
             vcflib::Variant variant;
-            variant.sequenceName = refPathName;
+            variant.sequenceName = contigName;
             variant.setVariantCallFile(vcf);
             variant.quality = 0;
             
