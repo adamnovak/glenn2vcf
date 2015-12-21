@@ -165,9 +165,9 @@ int main(int argc, char** argv) {
     
     // Option variables
     // What's the name of the reference path in the graph?
-    std::string refPathName = "ref";
+    std::string refPathName = "";
     // What name should we give the contig in the VCF file?
-    std::string contigName = ".";
+    std::string contigName = "";
     // What name should we use for the sample in the VCF file?
     std::string sampleName = "SAMPLE";
     // Should we output lines for all the reference positions that do exist?
@@ -247,6 +247,20 @@ int main(int argc, char** argv) {
     
     // Load up the VG file
     vg::VG vg(vgStream);
+    
+    if(refPathName.empty()) {
+        std:cerr << "Graph has " << vg.paths.size() << " paths to choose from."
+            << std::endl;
+        if(vg.paths.size() == 1) {
+            // Autodetect the reference path name as the name of the only path
+            refPathName = (*vg.paths._paths.begin()).first;
+        } else {
+            refPathName = "ref";
+        }
+        
+        std::cerr << "Guessed reference path name of " << refPathName
+            << std::endl;
+    }
     
     // Make sure the reference path is present
     assert(vg.paths.has_path(refPathName));
