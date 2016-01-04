@@ -19,6 +19,10 @@
 //  - Parallelize variant generation
 //  - Make variant stamping out some kind of function, don't duplicate the same variant construction code 6 times
 
+// How many bases may we put in an allele in VCF if we expect GATK to be able to
+// parse it?
+const static int MAX_ALLELE_LENGTH = 4096;
+
 /**
  * Represents our opinion of a particular base in a node in the graph.
  */
@@ -106,6 +110,23 @@ void create_ref_allele(vcflib::Variant& variant, const std::string& allele) {
     variant.alleles.push_back(allele);
     // Build the reciprocal index-by-allele mapping
     variant.updateAlleleIndexes();
+}
+
+/**
+ * Return true if a variant may be output, or false if this variant is valid but
+ * the GATK might choke on it.
+ *
+ * Mostly used to throw out variants with very logn alleles, because GATK has an
+ * allele length limit. How alleles that really *are* 1 megabase deletions are
+ * to be specified to GATK is left as an exercise to the reader.
+ */
+bool can_write_alleles(vcflib::Variant& variant) {
+    for(auto& allele : variant.alleles) {
+        if(allele.size() > MAX_ALLELE_LENGTH) {
+            return false;
+        }
+    }
+    return true;
 }
 
 /**
@@ -380,6 +401,12 @@ int main(int argc, char** argv) {
         // Read the base that the graph has at this position
         char graphBase;
         tokens >> graphBase;
+        
+        if(vg.get_node(nodeId)->sequence().size() <= offset) {
+            throw std::runtime_error("Node " + std::to_string(nodeId) + " offset " +
+                std::to_string(offset) + " is out of range on " +
+                std::to_string(vg.get_node(nodeId)->sequence().size()) + " bp node");
+        }
         
         // TODO: make sure the graph we're using agrees with the reference base.
         if(vg.get_node(nodeId)->sequence()[offset] != graphBase) {
@@ -753,8 +780,13 @@ int main(int argc, char** argv) {
             << " at 1-based reference position " << variant.position
             << std::endl;
 
-        // Output the created VCF variant.
-        std::cout << variant << std::endl;
+        if(can_write_alleles(variant)) {
+            // Output the created VCF variant.
+            std::cout << variant << std::endl;
+        } else {
+            std::cerr << "Variant is too large" << std::endl;
+            basesLost += altAllele.size();
+        }
     });
     
     vg.for_each_node([&](vg::Node* node) {
@@ -891,8 +923,13 @@ int main(int argc, char** argv) {
                     << std::endl;
                     
                     
-                // Output the created VCF variant.
-                std::cout << variant << std::endl;
+                if(can_write_alleles(variant)) {
+                    // Output the created VCF variant.
+                    std::cout << variant << std::endl;
+                } else {
+                    std::cerr << "Variant is too large" << std::endl;
+                    basesLost += altNumbersPresent.size();
+                }
             } else if(!call.graphBasePresent) {
                 // This reference base isn't present at all!
                 if(copynumberUsedByAlts[node->id()] < 2) {
@@ -935,8 +972,13 @@ int main(int argc, char** argv) {
                             << " at 1-based reference position " << variant.position
                             << std::endl;
                             
-                        // Output the created VCF variant.
-                        std::cout << variant << std::endl;
+                        if(can_write_alleles(variant)) {
+                            // Output the created VCF variant.
+                            std::cout << variant << std::endl;
+                        } else {
+                            std::cerr << "Variant is too large" << std::endl;
+                            basesLost += refAllele.size();
+                        }
                         
                     } else {
                         // One or a few bases of the node are missing. Call them
@@ -982,8 +1024,13 @@ int main(int argc, char** argv) {
                     // Set the variant position. Convert to 1-based.
                     variant.position = referencePosition + 1 + variantOffset;
                     
-                    // Output the created VCF variant.
-                    std::cout << variant << std::endl;
+                    if(can_write_alleles(variant)) {
+                        // Output the created VCF variant.
+                        std::cout << variant << std::endl;
+                    } else {
+                        std::cerr << "Variant is too large" << std::endl;
+                        basesLost += refAllele.size();
+                    }
                 }
             }
             
@@ -1048,7 +1095,13 @@ int main(int argc, char** argv) {
                     << " at 1-based reference position " << variant.position
                     << std::endl;
                     
-                std::cout << variant << std::endl;
+                if(can_write_alleles(variant)) {
+                    // Output the created VCF variant.
+                    std::cout << variant << std::endl;
+                } else {
+                    std::cerr << "Variant is too large" << std::endl;
+                    basesLost += refAllele.size();
+                }
                     
                 // Clear the running deletion
                 runningDelStart = -1;
@@ -1105,7 +1158,13 @@ int main(int argc, char** argv) {
                 << " at 1-based reference position " << variant.position
                 << std::endl;
                 
-            std::cout << variant << std::endl;
+            if(can_write_alleles(variant)) {
+                // Output the created VCF variant.
+                std::cout << variant << std::endl;
+            } else {
+                std::cerr << "Variant is too large" << std::endl;
+                basesLost += refAllele.size();
+            }
                 
             // Clear the running deletion
             runningDelStart = -1;
