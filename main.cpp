@@ -381,6 +381,13 @@ int main(int argc, char** argv) {
         char graphBase;
         tokens >> graphBase;
         
+        // TODO: make sure the graph we're using agrees with the reference base.
+        if(vg.get_node(nodeId)->sequence()[offset] != graphBase) {
+            throw std::runtime_error("Node " + std::to_string(nodeId) + " offset " +
+                std::to_string(offset) + " is " + char_to_string(vg.get_node(nodeId)->sequence()[offset]) +
+                " and not " + graphBase);
+        }
+        
         // Read the call string
         std::string call;
         tokens >> call;
