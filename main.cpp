@@ -106,6 +106,15 @@ void write_vcf_header(std::ostream& stream, std::string sample_name) {
 void create_ref_allele(vcflib::Variant& variant, const std::string& allele) {
     // Set the ref allele
     variant.ref = allele;
+    
+    for(size_t i = 0; i < variant.ref.size(); i++) {
+        // Look at all the bases
+        if(variant.ref[i] != 'A' && variant.ref[i] != 'C' && variant.ref[i] != 'G' && variant.ref[i] != 'T') {
+            // Correct anything bogus (like "X") to N
+            variant.ref[i] = 'N';
+        }
+    }
+    
     // Make it 0 in the alleles-by-index list
     variant.alleles.push_back(allele);
     // Build the reciprocal index-by-allele mapping
@@ -143,6 +152,17 @@ int add_alt_allele(vcflib::Variant& variant, const std::string& allele) {
         if(variant.alleles[i] == allele) {
             // Already exists
             return i;
+        }
+    }
+    
+    // Copy the allele so we can throw out bad characters
+    std::string fixed(allele);
+    
+    for(size_t i = 0; i < fixed.size(); i++) {
+        // Look at all the bases
+        if(fixed[i] != 'A' && fixed[i] != 'C' && fixed[i] != 'G' && fixed[i] != 'T') {
+            // Correct anything bogus (like "X") to N
+            fixed[i] = 'N';
         }
     }
 
