@@ -826,6 +826,14 @@ int main(int argc, char** argv) {
                     altNumbersPresent.insert(add_alt_allele(variant, altAllele));
                 }
                 
+                if(altNumbersPresent.count(0)) {
+                    // We found an alt that actually matches ref. Make sure it's represented as ref instead.
+                    altNumbersPresent.erase(altNumbersPresent.find(0));
+                    call.graphBasePresent = true;
+                    std::cerr << "ERROR: Found alt equal to reference. Correcting." << std::endl;
+                    // TODO: see if we have something silly like an off by 1 error? Throw an error here?
+                }
+                
                 // Set the variant position. Convert to 1-based.
                 variant.position = referencePosition + 1 + variantOffset;
                 
@@ -842,7 +850,8 @@ int main(int argc, char** argv) {
                         // We have the ref and no alts distinct from it showed
                         // up. Should not happen because we already made sure
                         // call.numberOfAlts > 0
-                        throw std::runtime_error("Found no alts when alts should exist");
+                        std::cerr << "ERROR: Found no alts when alts should exist" << std::endl;
+                        genotype.push_back("0/0");
                     }
                 } else if(altNumbersPresent.size() == 1) {
                     // We have only one alt allele, and no reference.
