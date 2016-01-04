@@ -111,14 +111,29 @@ void create_ref_allele(vcflib::Variant& variant, const std::string& allele) {
 /**
  * Add a new alt allele to a vcflib Variant, since apaprently there's no method
  * for that already.
+ *
+ * If that allele already exists in the variant, does not add it again.
+ *
+ * Retuerns the allele number (0, 1, 2, etc.) corresponding to the given allele
+ * string in the given variant. 
  */
-void add_alt_allele(vcflib::Variant& variant, const std::string& allele) {
+int add_alt_allele(vcflib::Variant& variant, const std::string& allele) {
+    for(int i = 0; i < variant.alleles.size(); i++) {
+        if(variant.alleles[i] == allele) {
+            // Already exists
+            return i;
+        }
+    }
+
     // Add it as an alt
     variant.alt.push_back(allele);
     // Make it next in the alleles-by-index list
     variant.alleles.push_back(allele);
     // Build the reciprocal index-by-allele mapping
     variant.updateAlleleIndexes();
+
+    // We added it in at the end
+    return variant.alleles.size() - 1;
 }
 
 /**
@@ -711,7 +726,7 @@ int main(int argc, char** argv) {
         create_ref_allele(variant, refAllele);
         
         // Add the graph version
-        add_alt_allele(variant, altAllele);
+        int altNumber = add_alt_allele(variant, altAllele);
         
         // Say we're going to spit out the genotype for this sample.        
         variant.format.push_back("GT");
@@ -719,12 +734,11 @@ int main(int argc, char** argv) {
         
         // Make it hom/het as appropriate
         if(refPathExists) {
-            // We're allele 1 (alt) and allele 2 (ref) heterozygous.
-            genotype.push_back("1/0");
+            // We're allele alt and ref heterozygous.
+            genotype.push_back(std::to_string(altNumber) + "/0");
         } else {
-            // We're allele 1 (alt) homozygous, other overlapping variants
-            // notwithstanding.
-            genotype.push_back("1/1");
+            // We're alt homozygous, other overlapping variants notwithstanding.
+            genotype.push_back(std::to_string(altNumber) + "/" + std::to_string(altNumber));
         }
 
         std::cerr << "Found variant " << refAllele << " -> " << altAllele
@@ -780,6 +794,9 @@ int main(int argc, char** argv) {
                 positionOnNode = i;
             }
         
+            // We need to keep track of the alts present.
+            std::set<int> altNumbersPresent;
+        
             // For each position along the node, grab the call there.
             auto& call = callsByNodeOffset[node->id()][positionOnNode];
             if(call.numberOfAlts > 0) {
@@ -806,7 +823,7 @@ int main(int argc, char** argv) {
                         altAllele = vg::reverse_complement(altAllele);
                     }
                     // Add the novel SNP allele
-                    add_alt_allele(variant, altAllele);
+                    altNumbersPresent.insert(add_alt_allele(variant, altAllele));
                 }
                 
                 // Set the variant position. Convert to 1-based.
@@ -818,10 +835,16 @@ int main(int argc, char** argv) {
                 
                 // Make it hom/het as appropriate
                 if(call.graphBasePresent) {
-                    // We have the ref and, since we have a variant, we also
-                    // have the alt.
-                    genotype.push_back("1/0");
-                } else if(call.numberOfAlts == 1) {
+                    if(altNumbersPresent.size() > 0) {
+                        // We have the ref and we also have an alt.
+                        genotype.push_back("1/0");
+                    } else {
+                        // We have the ref and no alts distinct from it showed
+                        // up. Should not happen because we already made sure
+                        // call.numberOfAlts > 0
+                        throw std::runtime_error("Found no alts when alts should exist");
+                    }
+                } else if(altNumbersPresent.size() == 1) {
                     // We have only one alt allele, and no reference.
                     if(copynumberUsedByAlts[node->id()] == 0) {
                         // We still have all our copy number, but we aren't
@@ -834,7 +857,7 @@ int main(int argc, char** argv) {
                         // TODO: should we make haploid calls here?
                         genotype.push_back("1/0");
                     }
-                } else if(call.numberOfAlts == 2) {
+                } else if(altNumbersPresent.size() == 2) {
                     // We have two alt alleles and no reference. We must have
                     // both present.
                     genotype.push_back("1/2");
@@ -881,12 +904,12 @@ int main(int argc, char** argv) {
                         create_ref_allele(variant, refAllele);
                         
                         // Add the novel deletion allele
-                        add_alt_allele(variant, altAllele);
+                        int altNumber = add_alt_allele(variant, altAllele);
                         
                         // Say it's homozygous alt
                         variant.format.push_back("GT");
                         auto& genotype = variant.samples[sampleName]["GT"];
-                        genotype.push_back("1/1");
+                        genotype.push_back(std::to_string(altNumber) + "/" + std::to_string(altNumber));
                         
                         // Set the variant position. Convert to 1-based.
                         variant.position = referencePosition + 1 + variantOffset;
@@ -933,7 +956,7 @@ int main(int argc, char** argv) {
                     create_ref_allele(variant, refAllele);
                     
                     // Add the novel deletion allele
-                    add_alt_allele(variant, altAllele);
+                    int altNumber = add_alt_allele(variant, altAllele);
                     
                     // Say it's homozygous ref
                     variant.format.push_back("GT");
@@ -994,12 +1017,12 @@ int main(int argc, char** argv) {
                 create_ref_allele(variant, refAllele);
                 
                 // Add the novel deletion allele
-                add_alt_allele(variant, altAllele);
+                int altNumber = add_alt_allele(variant, altAllele);
                 
                 // Say it's homozygous deleted for the whole run.
                 variant.format.push_back("GT");
                 auto& genotype = variant.samples[sampleName]["GT"];
-                genotype.push_back("1/1");
+                genotype.push_back(std::to_string(altNumber) + "/" + std::to_string(altNumber));
                 
                 // Set the variant position. Convert to 1-based.
                 variant.position = runningDelStart + 1 + variantOffset;
@@ -1051,12 +1074,12 @@ int main(int argc, char** argv) {
             create_ref_allele(variant, refAllele);
             
             // Add the novel deletion allele
-            add_alt_allele(variant, altAllele);
+            int altNumber = add_alt_allele(variant, altAllele);
             
             // Say it's homozygous deleted for the whole run.
             variant.format.push_back("GT");
             auto& genotype = variant.samples[sampleName]["GT"];
-            genotype.push_back("1/1");
+            genotype.push_back(std::to_string(altNumber) + "/" + std::to_string(altNumber));
             
             // Set the variant position. Convert to 1-based.
             variant.position = runningDelStart + 1 + variantOffset;
