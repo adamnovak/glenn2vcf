@@ -206,6 +206,7 @@ void help_main(char** argv) {
         << "    -r, --ref PATH      use the given path name as the reference path" << std::endl
         << "    -c, --contig NAME   use the given name as the VCF contig name" << std::endl
         << "    -g, --gvcf          include lines for non-variant positions" << std::endl
+        << "    -d, --deletions     include reference deletions or replacements with <NON_REF>" << std::endl
         << "    -s, --sampe NAME    name the sample in the VCF with the given name" << std::endl
         << "    -o, --offset INT    offset variant positions by this amount" << std::endl
         << "    -h, --help          print this help message" << std::endl;
@@ -228,6 +229,9 @@ int main(int argc, char** argv) {
     std::string sampleName = "SAMPLE";
     // Should we output lines for all the reference positions that do exist?
     bool announceNonVariant = false;
+    // Should we include deletions from the reference when the reference base
+    // isn't noted as present?
+    bool announceDeletions = false;
     // How far should we offset positions of variants?
     int64_t variantOffset = 0;
     
@@ -238,6 +242,7 @@ int main(int argc, char** argv) {
             {"ref", required_argument, 0, 'r'},
             {"contig", required_argument, 0, 'c'},
             {"gvcf", no_argument, 0, 'g'},
+            {"deletions", no_argument, 0, 'd'},
             {"sample", required_argument, 0, 's'},
             {"offset", required_argument, 0, 'o'},
             {"help", no_argument, 0, 'h'},
@@ -246,7 +251,7 @@ int main(int argc, char** argv) {
 
         int optionIndex = 0;
 
-        char option = getopt_long(argc, argv, "r:gs:o:h", longOptions, &optionIndex);
+        char option = getopt_long(argc, argv, "r:c:gds:o:h", longOptions, &optionIndex);
         switch(option) {
         // Option value is in global optarg
         case 'r':
@@ -260,6 +265,10 @@ int main(int argc, char** argv) {
         case 'g':
             // Say we need to announce non-variant ref positions
             announceNonVariant = true;
+            break;
+        case 'd':
+            // Say we need to announce deleted ref positions
+            announceDeletions = true;
             break;
         case 's':
             // Set the sample name
@@ -942,7 +951,6 @@ int main(int argc, char** argv) {
                     << " at 1-based reference position " << variant.position
                     << std::endl;
                     
-                    
                 if(can_write_alleles(variant)) {
                     // Output the created VCF variant.
                     std::cout << variant << std::endl;
@@ -952,10 +960,10 @@ int main(int argc, char** argv) {
                 }
             } else if(!call.graphBasePresent) {
                 // This reference base isn't present at all!
-                if(copynumberUsedByAlts[node->id()] < 2) {
+                if(copynumberUsedByAlts[node->id()] < 2 && announceDeletions) {
                     // All the copy number we would expect to see hasn't been
-                    // used up by alts bypassing this base. We need to say it's
-                    // missing.
+                    // used up by alts bypassing this base, and we want to hear
+                    // about deletions. We need to say it's missing.
                     
                     if(basesPresent == 0) {
                         // The whole node is missing! And we don't know where it
