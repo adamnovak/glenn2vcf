@@ -364,6 +364,8 @@ int main(int argc, char** argv) {
             // Add in a mapping.
             referencePositionAndOrientation[mapping.position().node_id()] = 
                 std::make_pair(referenceBase, mapping.is_reverse());
+                
+            std::cerr << "Node " << mapping.position().node_id() << " starts at base " << referenceBase << " with " << vg.get_node(mapping.position().node_id())->sequence() << std::endl;
         }
         
         // Find the node's sequence
