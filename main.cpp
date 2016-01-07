@@ -313,6 +313,9 @@ int main(int argc, char** argv) {
     // Load up the VG file
     vg::VG vg(vgStream);
     
+    vg.paths.sort_by_mapping_rank();
+    vg.paths.rebuild_mapping_aux();
+    
     if(refPathName.empty()) {
         std:cerr << "Graph has " << vg.paths.size() << " paths to choose from."
             << std::endl;
@@ -353,6 +356,10 @@ int main(int argc, char** argv) {
     
     // What base are we at in the reference
     size_t referenceBase = 0;
+    
+    // What was the last rank? Ranks must always go up.
+    int64_t lastRank = -1;
+    
     for(auto mapping : vg.paths.get_path(refPathName)) {
         // All the mappings need to be perfect matches.
         assert(mapping_is_perfect_match(mapping));
@@ -365,7 +372,13 @@ int main(int argc, char** argv) {
             referencePositionAndOrientation[mapping.position().node_id()] = 
                 std::make_pair(referenceBase, mapping.is_reverse());
                 
-            std::cerr << "Node " << mapping.position().node_id() << " starts at base " << referenceBase << " with " << vg.get_node(mapping.position().node_id())->sequence() << std::endl;
+            std::cerr << "Node " << mapping.position().node_id() << " rank " << mapping.rank()
+                << " starts at base " << referenceBase << " with "
+                << vg.get_node(mapping.position().node_id())->sequence() << std::endl;
+            
+            // Make sure ranks are monotonically increasing along the path.
+            assert(mapping.rank() > lastRank);
+            lastRank = mapping.rank();
         }
         
         // Find the node's sequence
