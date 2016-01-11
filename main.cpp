@@ -800,6 +800,9 @@ int main(int argc, char** argv) {
         // Set the variant position. Convert to 1-based.
         variant.position = referenceIntervalStart + 1 + variantOffset;
         
+        // Name it with the node number we're saying exists.
+        variant.id = std::to_string(altNode.node->id());
+        
         // Initialize the ref allele
         create_ref_allele(variant, refAllele);
         
@@ -919,6 +922,9 @@ int main(int argc, char** argv) {
                 
                 // Set the variant position. Convert to 1-based.
                 variant.position = referencePosition + 1 + variantOffset;
+                
+                // Cram the node and offset into the variant ID column, for these point variants
+                variant.id = std::to_string(node->id()) + "." + std::to_string(positionOnNode);
                 
                 // Say we're going to spit out the genotype for this sample.        
                 variant.format.push_back("GT");
