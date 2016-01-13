@@ -372,9 +372,11 @@ int main(int argc, char** argv) {
             referencePositionAndOrientation[mapping.position().node_id()] = 
                 std::make_pair(referenceBase, mapping.is_reverse());
                 
+#ifdef debug
             std::cerr << "Node " << mapping.position().node_id() << " rank " << mapping.rank()
                 << " starts at base " << referenceBase << " with "
                 << vg.get_node(mapping.position().node_id())->sequence() << std::endl;
+#endif
             
             // Make sure ranks are monotonically increasing along the path.
             assert(mapping.rank() > lastRank);
@@ -822,10 +824,12 @@ int main(int argc, char** argv) {
             genotype.push_back(std::to_string(altNumber) + "/" + std::to_string(altNumber));
         }
 
+#ifdef debug
         std::cerr << "Found variant " << refAllele << " -> " << altAllele
             << " caused by node " << altNode.node->id()
             << " at 1-based reference position " << variant.position
             << std::endl;
+#endif
 
         if(can_write_alleles(variant)) {
             // Output the created VCF variant.
@@ -964,6 +968,7 @@ int main(int argc, char** argv) {
                     throw std::runtime_error("Semantically invalid BaseCall");
                 }
 
+#ifdef debug
                 std::cerr << "Found  alt-bearing variant " << refAllele << " -> ";
                 for(int j = 0; j < call.numberOfAlts; j++) {
                     std::cerr << call.alts[j] << ",";
@@ -971,6 +976,7 @@ int main(int argc, char** argv) {
                 std::cerr << " on node " << node->id()
                     << " at 1-based reference position " << variant.position
                     << std::endl;
+#endif
                     
                 if(can_write_alleles(variant)) {
                     // Output the created VCF variant.
@@ -1019,10 +1025,12 @@ int main(int argc, char** argv) {
                         // Set the variant position. Convert to 1-based.
                         variant.position = referencePosition + 1 + variantOffset;
                         
+#ifdef debug
                         std::cerr << "Found NR variant " << refAllele << " -> "
                             << altAllele << " on node " << node->id()
                             << " at 1-based reference position " << variant.position
                             << std::endl;
+#endif
                             
                         if(can_write_alleles(variant)) {
                             // Output the created VCF variant.
@@ -1095,7 +1103,9 @@ int main(int argc, char** argv) {
                 // How many bases were deleted?
                 size_t runningDelLength = referencePosition - runningDelStart;
                 
+#ifdef debug
                 std::cerr << "Running del length " << runningDelLength << " internal to node." << std::endl;
+#endif
                 
                 std::string refAllele;
                 std::string altAllele;
@@ -1145,10 +1155,12 @@ int main(int argc, char** argv) {
                 // Set the variant position. Convert to 1-based.
                 variant.position = runningDelStart + 1 + variantOffset;
                 
+#ifdef debug
                 std::cerr << "Found variant " << refAllele << " -> "
                     << altAllele << " on node " << node->id()
                     << " at 1-based reference position " << variant.position
                     << std::endl;
+#endif
                     
                 if(can_write_alleles(variant)) {
                     // Output the created VCF variant.
@@ -1176,7 +1188,9 @@ int main(int argc, char** argv) {
             size_t runningDelLength = (referencePositionAndOrientation.at(node->id()).first +
                 node->sequence().size() - runningDelStart);
                 
+#ifdef debug
             std::cerr << "Running del length " << runningDelLength << " at end of node." << std::endl;
+#endif
             
             // We want the ref allele to start a base early and include
             // the base before the deleted bases.
@@ -1208,10 +1222,12 @@ int main(int argc, char** argv) {
             // Set the variant position. Convert to 1-based.
             variant.position = runningDelStart + 1 + variantOffset;
             
+#ifdef debug
             std::cerr << "Found variant " << refAllele << " -> "
                 << altAllele << " on node " << node->id()
                 << " at 1-based reference position " << variant.position
                 << std::endl;
+#endif
                 
             if(can_write_alleles(variant)) {
                 // Output the created VCF variant.
