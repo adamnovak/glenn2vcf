@@ -1002,6 +1002,9 @@ int main(int argc, char** argv) {
                         variant.setVariantCallFile(vcf);
                         variant.quality = 0;
                         
+                        // Cram the node and offset into the variant ID column, for these point variants
+                        variant.id = std::to_string(node->id()) + "." + std::to_string(positionOnNode);
+                        
                         // Initialize the ref allele
                         create_ref_allele(variant, refAllele);
                         
@@ -1058,6 +1061,9 @@ int main(int argc, char** argv) {
                     variant.sequenceName = contigName;
                     variant.setVariantCallFile(vcf);
                     variant.quality = 0;
+                    
+                    // Cram the node and offset into the variant ID column, for these point variants
+                    variant.id = std::to_string(node->id()) + "." + std::to_string(positionOnNode);
                     
                     // Initialize the ref allele
                     create_ref_allele(variant, refAllele);
