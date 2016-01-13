@@ -371,7 +371,6 @@ int main(int argc, char** argv) {
             // Add in a mapping.
             referencePositionAndOrientation[mapping.position().node_id()] = 
                 std::make_pair(referenceBase, mapping.is_reverse());
-                
 #ifdef debug
             std::cerr << "Node " << mapping.position().node_id() << " rank " << mapping.rank()
                 << " starts at base " << referenceBase << " with "
@@ -384,11 +383,33 @@ int main(int argc, char** argv) {
         }
         
         // Find the node's sequence
-        auto& sequence = vg.get_node(mapping.position().node_id())->sequence();
+        std::string sequence = vg.get_node(mapping.position().node_id())->sequence();
         
-        // Add it to our idea of the reference string
-        refSeqStream << sequence;
+        while(referenceBase == 0 && sequence.size() > 0 &&
+            (sequence[0] != 'A' && sequence[0] != 'T' && sequence[0] != 'C' &&
+            sequence[0] != 'G' && sequence[0] != 'N')) {
+            
+            // If the path leads with invalid characters (like "X"), throw them
+            // out when computing reference path positions.
+            
+            // TODO: this is a hack to deal with the debruijn-brca1-k63 graph,
+            // which leads with an X.
+            
+            std::cerr << "Warning: dropping invalid leading character "
+                << sequence[0] << " from node " << mapping.position().node_id()
+                << std::endl;
+                
+            sequence.erase(sequence.begin());
+        }
         
+        if(mapping.is_reverse()) {
+            // Put the reverse sequence in the reference path
+            refSeqStream << vg::reverse_complement(sequence);
+        } else {
+            // Put the forward sequence in the reference path
+            refSeqStream << sequence;
+        }
+            
         // Say that this node appears here along the reference in this
         // orientation.
         nodesByReference[referenceBase] = vg::NodeTraversal(
@@ -399,9 +420,12 @@ int main(int argc, char** argv) {
         
         // Whether we found the right place for this node in the reference or
         // not, we still need to advance along the reference path. We assume the
-        // whole node is included in the path (since it sort of has to be,
-        // syntactically, unless it's the first or last node).
+        // whole node (except any leading bogus characters) is included in the
+        // path (since it sort of has to be, syntactically, unless it's the
+        // first or last node).
         referenceBase += sequence.size();
+        
+        // TODO: handle leading bogus characters in calls on the first node.
     }
     
     // Create the actual reference sequence we will use
