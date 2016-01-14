@@ -91,11 +91,15 @@ std::string char_to_string(const char& letter) {
 /**
  * Write a minimal VCF header for a single-sample file.
  */
-void write_vcf_header(std::ostream& stream, std::string sample_name) {
-   stream << "##fileformat=VCFv4.2" << std::endl;
-   stream << "##ALT=<ID=NON_REF,Description=\"Represents any possible alternative allele at this location\">" << std::endl;
-   stream << "##FORMAT=<ID=GT,Number=1,Type=Integer,Description=\"Genotype\">" << std::endl;
-   stream << "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t" << sample_name << std::endl;
+void write_vcf_header(std::ostream& stream, std::string& sample_name, std::string& contig_name, size_t contig_size) {
+    stream << "##fileformat=VCFv4.2" << std::endl;
+    stream << "##ALT=<ID=NON_REF,Description=\"Represents any possible alternative allele at this location\">" << std::endl;
+    stream << "##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">" << std::endl;
+    if(!contig_name.empty()) {
+        // Announce the contig as well.
+        stream << "##contig=<ID=" << contig_name << ",length=" << contig_size << ">" << std::endl;
+    }
+    stream << "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t" << sample_name << std::endl;
 }
 
 /**
@@ -536,7 +540,7 @@ int main(int argc, char** argv) {
     // they know what to output.
     std::stringstream headerStream;
     // TODO: get sample name from file or a command line option.
-    write_vcf_header(headerStream, sampleName);
+    write_vcf_header(headerStream, sampleName, contigName, refSeq.size() + variantOffset);
     
     // Load the headers into a new VCF file object
     vcflib::VariantCallFile vcf;
