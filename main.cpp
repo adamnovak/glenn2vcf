@@ -609,6 +609,8 @@ int main(int argc, char** argv) {
     // it in a way that's clever enough to resolve multiple reference
     // occurrences smartly, but we're going to do it. This maps from reference
     // node ID to total copy number of that node used by bypassing alts.
+    // We also use this to note alts that have had copy number used by other
+    // bubbles.
     std::map<int64_t, int64_t> copynumberUsedByAlts;
     
     // What base are we at in the reference
@@ -936,6 +938,15 @@ int main(int argc, char** argv) {
                 // have us asserting nodes we shouldn't assert when the nodes we
                 // do assert would allow a different bubble.
                 
+                if(copynumberUsedByAlts.count(node->id()) && copynumberUsedByAlts.at(node->id()) > 0) {
+                    // This node has already had some copy number accounted for
+                    // in another bubble. TODO: Just assume it's genotype was
+                    // correct there. There's no way to go back and assert it as
+                    // homozygous when it was already called het in a bubble,
+                    // for example.
+                    return;
+                }
+                
                 // Look for the bubble
                 std::vector<vg::NodeTraversal> bubble = find_bubble(vg, node, refPathName);
                 
@@ -1139,6 +1150,24 @@ int main(int argc, char** argv) {
             
             // Stick the sequence
             altAlleleStream << addedSequence;
+            
+            // Also account for use of this node's copy number, so we won't go
+            // and use it to create its own bubble.
+            if(!copynumberUsedByAlts.count(addedNode.node->id())) {
+                // If the node has no copy number tally, make some space.
+                copynumberUsedByAlts[addedNode.node->id()] = 0;
+            }
+            
+            // Whether the reference path exists or not, we use 2 copy number
+            // here between the ref and the bubble
+            copynumberUsedByAlts[addedNode.node->id()] += 2;
+            
+            if(copynumberUsedByAlts[addedNode.node->id()] > 2) {
+                // If we end up doing this multiple times for a node, complain
+                // to the user, because we may not quite be correct in our
+                // conversion.
+                std::cerr << "Warning: Node " << addedNode.node->id() << " used by multiple bubbles!" << std::endl;
+            }
         }
         
         // Convert to a proper string
