@@ -200,7 +200,8 @@ bool mapping_is_perfect_match(const vg::Mapping& mapping) {
 /**
  * Do a breadth-first search left from the given node traversal, and return
  * minimal-length-in-nodes node list paths starting on the given named path and
- * ending at the given node, using only the given present nodes.
+ * ending at the given node, using only the given present nodes as non-primary-
+ * path parts of the bubble.
  */
 std::vector<std::list<vg::NodeTraversal>> bfs_left(vg::VG& graph,
     vg::NodeTraversal node, const std::string& pathName,
@@ -259,9 +260,17 @@ std::vector<std::list<vg::NodeTraversal>> bfs_left(vg::VG& graph,
             graph.nodes_prev(path.front(), prevNodes);
             
             for(auto prevNode : prevNodes) {
-                if(nodesPresent.count(prevNode.node->id()) && !alreadyQueued.count(prevNode)) {
-                    // This node is one we're allowed to visit, and we haven't
-                    // already found a way to get to it.
+                // For each node we can get to
+                
+                // Is this an anchoring node?
+                bool isPrimaryPath = graph.paths.has_node_mapping(prevNode.node) &&
+                    graph.paths.get_node_mapping(prevNode.node).count(pathName) &&
+                    graph.paths.get_node_mapping(prevNode.node).at(pathName).size();
+            
+                if((nodesPresent.count(prevNode.node->id()) || isPrimaryPath) && !alreadyQueued.count(prevNode)) {
+                    // This node is one we're allowed to visit (called as
+                    // present or on the primary path), and we haven't already
+                    // found a way to get to it.
             
                     // Make a new path extended left with each of these
                     std::list<vg::NodeTraversal> extended(path);
@@ -293,7 +302,8 @@ vg::NodeTraversal flip(vg::NodeTraversal toFlip) {
 /**
  * Do a breadth-first search right from the given node traversal, and return
  * minimal-length-in-nodes node list paths starting at the given node and ending
- * on the given named path, using only the given present nodes.
+ * on the given named path, using only the given present nodes as non-primary-
+ * path parts of the bubble.
  */
 std::vector<std::list<vg::NodeTraversal>> bfs_right(vg::VG& graph,
     vg::NodeTraversal node, const std::string& pathName,
