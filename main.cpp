@@ -197,6 +197,229 @@ bool mapping_is_perfect_match(const vg::Mapping& mapping) {
     return true;
 }
 
+/**
+ * Do a breadth-first search left from the given node traversal, and return
+ * minimal-length-in-nodes node list paths starting on the given named path and
+ * ending at the given node.
+ */
+std::vector<std::list<vg::NodeTraversal>> bfs_left(vg::VG& graph,
+    vg::NodeTraversal node, const std::string& pathName, int64_t maxDepth = 10) {
+
+    // Do a BFS => Use a queue of paths to extend
+    
+    
+    // This holds the paths to get to NodeTraversals to visit (all of which will
+    // end with the node we're starting with).
+    std::list<std::list<vg::NodeTraversal>> toExtend;
+    
+    // This keeps a set of all the oriented nodes we already got to and don't
+    // need to queue again. TODO: what if one way to get to them fails due to
+    // not being called as existing or something?
+    std::set<vg::NodeTraversal> alreadyQueued;
+    
+    // Start at this node at depth 0.
+    toExtend.emplace_back(std::list<vg::NodeTraversal> {node});
+    alreadyQueued.insert(node);
+    
+    // Fill in this result list
+    std::vector<std::list<vg::NodeTraversal>> toReturn;
+    
+    while(!toExtend.empty()) {
+        // Keep going until we've visited every node up to our max search depth.
+        
+        // Dequeue a path to extend
+        std::list<vg::NodeTraversal> path = toExtend.front();
+        toExtend.pop_front();
+        
+        if(!toReturn.empty() && path.size() > toReturn.front().size()) {
+            // We already know of a path that gets to the reference path in
+            // fewer steps. Drop this one and any possible descendants.
+            continue;
+        }
+        
+        // Look up and see if the front node on the path is on our reference
+        // path
+        if(graph.paths.has_node_mapping(path.front().node) &&
+            graph.paths.get_node_mapping(path.front().node).count(pathName) &&
+            graph.paths.get_node_mapping(path.front().node).at(pathName).size()) {
+            // There are paths that visit this node, and one of them is the
+            // reference path.
+            
+            // Say we got to the right place
+            toReturn.push_back(path);
+            
+            // Don't bother looking for extensions, we already got there.
+        } else if(path.size() <= maxDepth) {
+            // We haven't hit the reference path yet, but we also haven't hit
+            // the max depth. Extend with all the possible extensions.
+            
+            // Look left
+            vector<vg::NodeTraversal> prevNodes;
+            graph.nodes_prev(path.front(), prevNodes);
+            
+            for(auto prevNode : prevNodes) {
+                if(!alreadyQueued.count(prevNode)) {
+            
+                    // Make a new path extended left with each of these
+                    std::list<vg::NodeTraversal> extended(path);
+                    extended.push_front(prevNode);
+                    toExtend.push_back(extended);
+                    
+                    // Remember we found a way to this node, so we don't try and
+                    // visit it other ways.
+                    alreadyQueued.insert(prevNode);
+                }
+            }
+        }
+        
+    }
+    
+    // When we get here, we've filled in the vector with all the paths from the
+    // primary path to our designated node of minimal node count. TODO: sort
+    // them somehow.
+    return toReturn;
+}
+
+/**
+ * Flip a NodeTraversal around and return the flipped copy.
+ */
+vg::NodeTraversal flip(vg::NodeTraversal toFlip) {
+    return vg::NodeTraversal(toFlip.node, !toFlip.backward);
+}
+
+/**
+ * Do a breadth-first search right from the given node traversal, and return
+ * minimal-length-in-nodes node list paths starting at the given node and ending
+ * on the given named path.
+ */
+std::vector<std::list<vg::NodeTraversal>> bfs_right(vg::VG& graph,
+    vg::NodeTraversal node, const std::string& pathName, int64_t maxDepth = 10) {
+
+    // Look left from the backward version of the node.
+    std::vector<std::list<vg::NodeTraversal>> toReturn = bfs_left(graph, flip(node), pathName, maxDepth);
+    
+    for(auto path : toReturn) {
+        // Invert the order of every path in palce
+        path.reverse();
+        
+        for(auto& traversal : path) {
+            // And invert the orientation of every node in the path in place.
+            traversal = flip(traversal);
+        }
+    }
+    
+    return toReturn;
+}
+
+/**
+ * Given a vg graph, a node in the graph, and a path in the graph, look out from
+ * the node in both directions to find a bubble relative to the path, with a
+ * consistent orientation. Return the ordered and oriented nodes in the bubble,
+ * with the outer nodes being on the named path.
+ */
+std::vector<vg::NodeTraversal>
+find_bubble(vg::VG& graph, vg::Node* node, const std::string& pathName) {
+
+    // Find paths on both sides, with nodes on the primary path at the outsides
+    // and this node in the middle.
+    auto leftPaths = bfs_left(graph, vg::NodeTraversal(node), pathName);
+    auto rightPaths = bfs_right(graph, vg::NodeTraversal(node), pathName);
+    
+    // Find a combination of two paths which gets us to the reference in a
+    // consistent orientation (meaning that when you look at the ending nodes'
+    // Mappings in the reference path, the ones with minimal ranks have the same
+    // orientations).
+
+    for(auto leftPath : leftPaths) {
+        // Figure out the relative orientation for the leftmost node.
+        
+        // Split out its node pointer and orientation
+        auto leftNode = leftPath.front().node;
+        auto leftOrientation = leftPath.front().backward;
+        
+        // Get all the Mappings in a nonempty set
+        std::set<vg::Mapping*> leftMappings = graph.paths.get_node_mapping(leftNode).at(pathName);
+        
+        vg::Mapping* firstMapping = nullptr;
+        
+        for(vg::Mapping* mapping : leftMappings) {
+            // Look at all the mappings of this node
+            if(firstMapping == nullptr || firstMapping->rank() > mapping->rank()) {
+                // This one is the leftmost one we have seen so far
+                firstMapping = mapping;
+            }
+        }
+        
+        assert(firstMapping != nullptr);
+        
+        // We have a backward orientation relative to the reference path if we
+        // were traversing the anchoring node backwards, xor if it is backwards
+        // in the reference path.
+        bool leftRelativeOrientation = leftOrientation ^ firstMapping->is_reverse();
+        
+        for(auto rightPath : rightPaths) {
+            // Figure out the relative orientation for the rightmost node.
+            
+            // Split out its node pointer and orientation
+            // Remember it's at the end of this path.
+            auto rightNode = rightPath.back().node;
+            auto rightOrientation = rightPath.back().backward;
+            
+            // Get all the Mappings in a nonempty set
+            std::set<vg::Mapping*> rightMappings = graph.paths.get_node_mapping(rightNode).at(pathName);
+            
+            vg::Mapping* lastMapping = nullptr;
+            
+            for(vg::Mapping* mapping : rightMappings) {
+                // Look at all the mappings of this node
+                if(lastMapping == nullptr || lastMapping->rank() > mapping->rank()) {
+                    // This one is the leftmost one we have seen so far.
+                    // We do infact want the leftmost mapping we can find on the right.
+                    lastMapping = mapping;
+                }
+            }
+            
+            assert(lastMapping != nullptr);
+            
+            // We have a backward orientation relative to the reference path if we
+            // were traversing the anchoring node backwards, xor if it is backwards
+            // in the reference path.
+            bool rightRelativeOrientation = rightOrientation ^ lastMapping->is_reverse();
+            
+            if(leftRelativeOrientation == rightRelativeOrientation) {
+                // We found a pair of paths that get us to and from the
+                // reference without turning around.
+                
+                // Start with the left path
+                std::vector<vg::NodeTraversal> toReturn{leftPath.begin(), leftPath.end()};
+                
+                for(auto it = ++(rightPath.begin()); it != rightPath.end(); ++it) {
+                    // For all but the first node on the right path, add that in
+                    toReturn.push_back(*it);
+                }
+                
+                if(leftRelativeOrientation) {
+                    // Turns out our anchored path is backwards.
+                    
+                    // Reorder everything the other way
+                    std::reverse(toReturn.begin(), toReturn.end());
+                    
+                    for(auto& traversal : toReturn) {
+                        // Flip each traversal
+                        traversal = flip(traversal);
+                    }
+                }
+                
+                // Just give the first valid path we find. TODO: search for
+                // paths where the whole thing is annotated present or whatever.
+                return toReturn;
+            }
+            
+        }
+    }
+}
+
+
 void help_main(char** argv) {
     std::cerr << "usage: " << argv[0] << " [options] VGFILE GLENNFILE" << std::endl
         << "Convert a Glenn-format vg graph and variant file pair to a VCF." << std::endl
@@ -539,7 +762,6 @@ int main(int argc, char** argv) {
     // available info fields or whatever are defined in the file's header, so
     // they know what to output.
     std::stringstream headerStream;
-    // TODO: get sample name from file or a command line option.
     write_vcf_header(headerStream, sampleName, contigName, refSeq.size() + variantOffset);
     
     // Load the headers into a new VCF file object
@@ -559,7 +781,7 @@ int main(int argc, char** argv) {
     
     vg.for_each_node([&](vg::Node* node) {
         // Look at every node in the graph and spit out variants for the ones
-        // that are non-reference, but attach to two reference nodes and are
+        // that are non-reference, but attached to two reference nodes and are
         // called as present.
     
         // Ensure this node is nonreference
@@ -601,7 +823,7 @@ int main(int argc, char** argv) {
         if(graphBasesPresent < node->sequence().size()) {
             // We shouldn't call this as a variant; they're not even
             // heterozygous this alt.
-            std::cerr << "Node " << node->id() << " is but only "
+            std::cerr << "Node " << node->id() << " has only "
                 << graphBasesPresent << "/" << node->sequence().size()
                 << " present. Skipping!" << std::endl;
             // We lose the bases that were there.
