@@ -298,7 +298,7 @@ std::vector<std::list<vg::NodeTraversal>> bfs_right(vg::VG& graph,
     // Look left from the backward version of the node.
     std::vector<std::list<vg::NodeTraversal>> toReturn = bfs_left(graph, flip(node), pathName, maxDepth);
     
-    for(auto path : toReturn) {
+    for(auto& path : toReturn) {
         // Invert the order of every path in palce
         path.reverse();
         
@@ -315,7 +315,8 @@ std::vector<std::list<vg::NodeTraversal>> bfs_right(vg::VG& graph,
  * Given a vg graph, a node in the graph, and a path in the graph, look out from
  * the node in both directions to find a bubble relative to the path, with a
  * consistent orientation. Return the ordered and oriented nodes in the bubble,
- * with the outer nodes being on the named path.
+ * with the outer nodes being oriented forward along the named path, and with
+ * the first node coming before the last node in the reference.
  */
 std::vector<vg::NodeTraversal>
 find_bubble(vg::VG& graph, vg::Node* node, const std::string& pathName) {
@@ -332,7 +333,12 @@ find_bubble(vg::VG& graph, vg::Node* node, const std::string& pathName) {
 
     for(auto leftPath : leftPaths) {
         // Figure out the relative orientation for the leftmost node.
-        
+#ifdef debug        
+        std::cerr << "Left path: " << std::endl;
+        for(auto traversal : leftPath ) {
+            std::cerr << "\t" << traversal << std::endl;
+        }
+#endif    
         // Split out its node pointer and orientation
         auto leftNode = leftPath.front().node;
         auto leftOrientation = leftPath.front().backward;
@@ -355,11 +361,16 @@ find_bubble(vg::VG& graph, vg::Node* node, const std::string& pathName) {
         // We have a backward orientation relative to the reference path if we
         // were traversing the anchoring node backwards, xor if it is backwards
         // in the reference path.
-        bool leftRelativeOrientation = leftOrientation ^ firstMapping->is_reverse();
+        bool leftRelativeOrientation = leftOrientation != firstMapping->is_reverse();
         
         for(auto rightPath : rightPaths) {
             // Figure out the relative orientation for the rightmost node.
-            
+#ifdef debug            
+            std::cerr << "Right path: " << std::endl;
+            for(auto traversal : rightPath ) {
+                std::cerr << "\t" << traversal << std::endl;
+            }
+#endif            
             // Split out its node pointer and orientation
             // Remember it's at the end of this path.
             auto rightNode = rightPath.back().node;
@@ -384,11 +395,14 @@ find_bubble(vg::VG& graph, vg::Node* node, const std::string& pathName) {
             // We have a backward orientation relative to the reference path if we
             // were traversing the anchoring node backwards, xor if it is backwards
             // in the reference path.
-            bool rightRelativeOrientation = rightOrientation ^ lastMapping->is_reverse();
+            bool rightRelativeOrientation = rightOrientation != lastMapping->is_reverse();
             
-            if(leftRelativeOrientation == rightRelativeOrientation) {
+            if(leftRelativeOrientation == rightRelativeOrientation &&
+                ((!leftRelativeOrientation && firstMapping->rank() < lastMapping->rank()) ||
+                (leftRelativeOrientation && firstMapping->rank() > lastMapping->rank()))) {
                 // We found a pair of paths that get us to and from the
-                // reference without turning around.
+                // reference without turning around, and that don't go back to
+                // the reference before they leave.
                 
                 // Start with the left path
                 std::vector<vg::NodeTraversal> toReturn{leftPath.begin(), leftPath.end()};
@@ -412,13 +426,21 @@ find_bubble(vg::VG& graph, vg::Node* node, const std::string& pathName) {
                 
                 // Just give the first valid path we find. TODO: search for
                 // paths where the whole thing is annotated present or whatever.
+#ifdef debug        
+                std::cerr << "Merged path:" << std::endl;
+                for(auto traversal : toReturn) {
+                    std::cerr << "\t" << traversal << std::endl;
+                }
+#endif
                 return toReturn;
             }
             
         }
     }
+    
+    // Return the empty vector if we can't find compatible paths.
+    return std::vector<vg::NodeTraversal>();
 }
-
 
 void help_main(char** argv) {
     std::cerr << "usage: " << argv[0] << " [options] VGFILE GLENNFILE" << std::endl
@@ -434,6 +456,7 @@ void help_main(char** argv) {
         << "    -c, --contig NAME   use the given name as the VCF contig name" << std::endl
         << "    -g, --gvcf          include lines for non-variant positions" << std::endl
         << "    -d, --deletions     include reference deletions or replacements with <NON_REF>" << std::endl
+        << "    -b, --bubbles       include nodes on larger inferred bubbles" << std::endl
         << "    -s, --sampe NAME    name the sample in the VCF with the given name" << std::endl
         << "    -o, --offset INT    offset variant positions by this amount" << std::endl
         << "    -h, --help          print this help message" << std::endl;
@@ -459,6 +482,8 @@ int main(int argc, char** argv) {
     // Should we include deletions from the reference when the reference base
     // isn't noted as present?
     bool announceDeletions = false;
+    // Should arbitrarily find long expanded bubbles for non-anchored nodes?
+    bool useBubbles = false;
     // How far should we offset positions of variants?
     int64_t variantOffset = 0;
     
@@ -470,6 +495,7 @@ int main(int argc, char** argv) {
             {"contig", required_argument, 0, 'c'},
             {"gvcf", no_argument, 0, 'g'},
             {"deletions", no_argument, 0, 'd'},
+            {"bubbles", no_argument, 0, 'b'},
             {"sample", required_argument, 0, 's'},
             {"offset", required_argument, 0, 'o'},
             {"help", no_argument, 0, 'h'},
@@ -478,7 +504,7 @@ int main(int argc, char** argv) {
 
         int optionIndex = 0;
 
-        char option = getopt_long(argc, argv, "r:c:gds:o:h", longOptions, &optionIndex);
+        char option = getopt_long(argc, argv, "r:c:gdbs:o:h", longOptions, &optionIndex);
         switch(option) {
         // Option value is in global optarg
         case 'r':
@@ -496,6 +522,10 @@ int main(int argc, char** argv) {
         case 'd':
             // Say we need to announce deleted ref positions
             announceDeletions = true;
+            break;
+         case 'b':
+            // Say we should admit inferred large bubbles
+            useBubbles = true;
             break;
         case 's':
             // Set the sample name
@@ -884,73 +914,139 @@ int main(int argc, char** argv) {
             }
         }
         
+        // We're going to fill in these variables to describe a single- or
+        // multi-node bubble.
+        // Start of the interval we replace on the reference
+        size_t referenceIntervalStart;
+        // Past-the-end position of the interval we replace on the reference
+        size_t referenceIntervalPastEnd;
+        
+        // Oriented nodes we're replacing that interval with (from which alleles
+        // will be derived)
+        std::vector<vg::NodeTraversal> newNodes;
+        
         // Now check the above to make sure we're actually placed in a
         // consistent place in the reference. We need to be able to read along
         // the reference forward, into this node, and out the other end into the
         // reference later in the same orientation.
         if(leftmostInNode.node == nullptr || leftmostOutNode.node == nullptr) {
-            // We're missing a reference node on one side.
-            std::cerr << "Node " << node->id() << " not anchored to reference." << std::endl;
-            // We lose the bases we wanted to represent.
-            basesLost += graphBasesPresent;
-            return;
+            if(useBubbles) {
+                // Try and find a bubble that lets us place the node, and then
+                // say the whole bubble exists due to the node. TODO: this can
+                // have us asserting nodes we shouldn't assert when the nodes we
+                // do assert would allow a different bubble.
+                
+                // Look for the bubble
+                std::vector<vg::NodeTraversal> bubble = find_bubble(vg, node, refPathName);
+                
+                if(bubble.size() == 0) {
+                    // We couldn't find a way to make a bubble.
+                    std::cerr << "Node " << node->id() << " not part of bubble." << std::endl;
+                    // We lose the bases we wanted to represent.
+                    basesLost += graphBasesPresent;
+                    return;
+                }
+                
+                // Otherwise we have a bubble we can use.
+                
+                // TODO: ensure all the nodes we're tagging here are supposed to
+                // be present, and try other bubbles if they aren't. TODO: once
+                // we call the whole bubble for one of these nodes, don't call
+                // it again for other nodes.
+                
+                // Where do we start along the reference?
+                
+                // The position we have stored for this start node is the first
+                // position along the reference at which it occurs. Our bubble
+                // goes forward in the reference, so we must come out of the
+                // opposite end of the node from the one we have stored.
+                referenceIntervalStart = referencePositionAndOrientation.at(bubble.front().node->id()).first +
+                    bubble.front().node->sequence().size();
+                
+                // The position we have stored for the end node is the first
+                // position it occurs in the reference, and we know we go into
+                // it in a reference-concordant direction, so we must have our
+                // past-the-end position right there.
+                referenceIntervalPastEnd = referencePositionAndOrientation.at(bubble.back().node->id()).first;
+                
+                for(size_t i = 1; i < bubble.size() - 1; i++) {
+                    // Stick in all the non-anchoring nodes, dropping the first and last anchoring nodes.
+                    newNodes.push_back(bubble[i]);
+                }
+                
+            } else {
+                // We're missing a reference node on one side, and we can't do longer bubbles.
+                std::cerr << "Node " << node->id() << " not anchored to reference." << std::endl;
+                // We lose the bases we wanted to represent.
+                basesLost += graphBasesPresent;
+                return;
+            }
+        } else {
+            // We can proceed with a single-node bubble.
+        
+            // Determine if we read into this node forward along the reference
+            // (true) or backward along the reference (false). If we found the node
+            // to our left in the same orientation as it occurs in the reference,
+            // then we do read in forward.
+            bool readInForward = leftmostInNode.backward == referencePositionAndOrientation.at(leftmostInNode.node->id()).second;
+            
+            // If we found the node to our right in the same orientation as it
+            // occurs in the reference, then we do read out forward as well.
+            bool readOutForward = leftmostOutNode.backward == referencePositionAndOrientation.at(leftmostOutNode.node->id()).second;
+            
+            if(readInForward != readOutForward) {
+                // Going through this node would cause us to invert the direction
+                // we're traversing the reference in.
+                std::cerr << "Node " << node->id() << " inverts reference path." << std::endl;
+                // We lose the bases we wanted to represent.
+                basesLost += graphBasesPresent;
+                return;
+            }
+            
+            // We need to work out what orientation we have relative to the
+            // reference.
+            vg::NodeTraversal altNode(node);
+            
+            if(!readInForward) {
+                // We have a consistent orientation, but it's backward!
+                // Swap the in and out nodes, and traverse our node in reverse.
+                altNode.backward = true;
+                std::swap(leftmostInNode, leftmostOutNode);
+            }
+            
+            // Now we know that the in node really is where we come into the alt,
+            // and the out node really is where we leave the alt, when reading along
+            // the reference path. Either may still be backward in the reference
+            // path, though.
+            
+            // Work out where and how they are positioned in the reference
+            auto& inNodePlacement = referencePositionAndOrientation.at(leftmostInNode.node->id());
+            auto& outNodePlacement = referencePositionAndOrientation.at(leftmostOutNode.node->id());
+            
+            if(outNodePlacement.first <= inNodePlacement.first) {
+                // We're perfectly fine, orientation-wise, except we let you time
+                // travel and leave before you arrived.
+                std::cerr << "Node " << node->id() << " allows duplication." << std::endl;
+                // We lose the bases we wanted to represent.
+                basesLost += graphBasesPresent;
+                return;
+            }
+            
+            // So what are the actual bounds of the reference interval covered by
+            // the node? Since the node placement positions are just the first bases
+            // along the reference at which the nodes occur, we don't care about
+            // orientation of the anchoring node sequences.
+            referenceIntervalStart = inNodePlacement.first + leftmostInNode.node->sequence().size();
+            referenceIntervalPastEnd = outNodePlacement.first;
+            
+            // Just one node
+            newNodes.push_back(altNode);
         }
         
-        // Determine if we read into this node forward along the reference
-        // (true) or backward along the reference (false). If we found the node
-        // to our left in the same orientation as it occurs in the reference,
-        // then we do read in forward.
-        bool readInForward = leftmostInNode.backward == referencePositionAndOrientation.at(leftmostInNode.node->id()).second;
         
-        // If we found the node to our right in the same orientation as it
-        // occurs in the reference, then we do read out forward as well.
-        bool readOutForward = leftmostOutNode.backward == referencePositionAndOrientation.at(leftmostOutNode.node->id()).second;
-        
-        if(readInForward != readOutForward) {
-            // Going through this node would cause us to invert the direction
-            // we're traversing the reference in.
-            std::cerr << "Node " << node->id() << " inverts reference path." << std::endl;
-            // We lose the bases we wanted to represent.
-            basesLost += graphBasesPresent;
-            return;
-        }
-        
-        // We need to work out what orientation we have relative to the
-        // reference.
-        vg::NodeTraversal altNode(node);
-        
-        if(!readInForward) {
-            // We have a consistent orientation, but it's backward!
-            // Swap the in and out nodes, and traverse our node in reverse.
-            altNode.backward = true;
-            std::swap(leftmostInNode, leftmostOutNode);
-        }
-        
-        // Now we know that the in node really is where we come into the alt,
-        // and the out node really is where we leave the alt, when reading along
-        // the reference path. Either may still be backward in the reference
-        // path, though.
-        
-        // Work out where and how they are positioned in the reference
-        auto& inNodePlacement = referencePositionAndOrientation.at(leftmostInNode.node->id());
-        auto& outNodePlacement = referencePositionAndOrientation.at(leftmostOutNode.node->id());
-        
-        if(outNodePlacement.first <= inNodePlacement.first) {
-            // We're perfectly fine, orientation-wise, except we let you time
-            // travel and leave before you arrived.
-            std::cerr << "Node " << node->id() << " allows duplication." << std::endl;
-            // We lose the bases we wanted to represent.
-            basesLost += graphBasesPresent;
-            return;
-        }
-        
-        // So what are the actual bounds of the reference interval covered by
-        // the node? Since the node placement positions are just the first bases
-        // along the reference at which the nodes occur, we don't care about
-        // orientation of the anchoring node sequences.
-        size_t referenceIntervalStart = inNodePlacement.first + leftmostInNode.node->sequence().size();
-        size_t referenceIntervalPastEnd = outNodePlacement.first;
+        // Make sure we got reasonable bounds whatever kind of bubble we have.
         assert(referenceIntervalPastEnd >= referenceIntervalStart);
+        
         // How long is this interval in the reference?
         size_t referenceIntervalSize = referenceIntervalPastEnd - referenceIntervalStart;
         
@@ -1029,11 +1125,24 @@ int main(int argc, char** argv) {
         // Pull out the string for the reference allele
         std::string refAllele = refSeq.substr(referenceIntervalStart, referenceIntervalSize);
         // And for the alt allele
-        std::string altAllele = altNode.node->sequence();
-        if(altNode.backward) {
-            // If the node is traversed backward, we need to flip its sequence.
-            altAllele = vg::reverse_complement(altAllele);
+        std::stringstream altAlleleStream;
+        
+        for(auto& addedNode : newNodes) {
+            // For each node we're adding in, stick in the sequence in the
+            // correct orientation
+            std::string addedSequence = addedNode.node->sequence();
+            
+            if(addedNode.backward) {
+                // If the node is traversed backward, we need to flip its sequence.
+                addedSequence = vg::reverse_complement(addedSequence);
+            }
+            
+            // Stick the sequence
+            altAlleleStream << addedSequence;
         }
+        
+        // Convert to a proper string
+        std::string altAllele(altAlleleStream.str());
         
         if(refAllele.size() == 0) {
             // Shift everybody left by 1 base for the anchoring base that VCF
@@ -1052,8 +1161,16 @@ int main(int argc, char** argv) {
         // Set the variant position. Convert to 1-based.
         variant.position = referenceIntervalStart + 1 + variantOffset;
         
-        // Name it with the node number we're saying exists.
-        variant.id = std::to_string(altNode.node->id());
+        // Name it with the node numbers we're saying exist.
+        std::stringstream idStream;
+        for(size_t i = 0; i < newNodes.size(); i++) {
+            idStream << std::to_string(newNodes[i].node->id());
+            if(i != newNodes.size() - 1) {
+                // Add a separator
+                idStream << "_";
+            }
+        }
+        variant.id = idStream.str();
         
         // Initialize the ref allele
         create_ref_allele(variant, refAllele);
