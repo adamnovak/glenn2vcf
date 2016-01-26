@@ -200,10 +200,11 @@ bool mapping_is_perfect_match(const vg::Mapping& mapping) {
 /**
  * Do a breadth-first search left from the given node traversal, and return
  * minimal-length-in-nodes node list paths starting on the given named path and
- * ending at the given node.
+ * ending at the given node, using only the given present nodes.
  */
 std::vector<std::list<vg::NodeTraversal>> bfs_left(vg::VG& graph,
-    vg::NodeTraversal node, const std::string& pathName, int64_t maxDepth = 10) {
+    vg::NodeTraversal node, const std::string& pathName,
+    const std::set<int64_t>& nodesPresent, int64_t maxDepth = 10) {
 
     // Do a BFS => Use a queue of paths to extend
     
@@ -258,7 +259,9 @@ std::vector<std::list<vg::NodeTraversal>> bfs_left(vg::VG& graph,
             graph.nodes_prev(path.front(), prevNodes);
             
             for(auto prevNode : prevNodes) {
-                if(!alreadyQueued.count(prevNode)) {
+                if(nodesPresent.count(prevNode.node->id()) && !alreadyQueued.count(prevNode)) {
+                    // This node is one we're allowed to visit, and we haven't
+                    // already found a way to get to it.
             
                     // Make a new path extended left with each of these
                     std::list<vg::NodeTraversal> extended(path);
@@ -290,13 +293,14 @@ vg::NodeTraversal flip(vg::NodeTraversal toFlip) {
 /**
  * Do a breadth-first search right from the given node traversal, and return
  * minimal-length-in-nodes node list paths starting at the given node and ending
- * on the given named path.
+ * on the given named path, using only the given present nodes.
  */
 std::vector<std::list<vg::NodeTraversal>> bfs_right(vg::VG& graph,
-    vg::NodeTraversal node, const std::string& pathName, int64_t maxDepth = 10) {
+    vg::NodeTraversal node, const std::string& pathName,
+    const std::set<int64_t>& nodesPresent, int64_t maxDepth = 10) {
 
     // Look left from the backward version of the node.
-    std::vector<std::list<vg::NodeTraversal>> toReturn = bfs_left(graph, flip(node), pathName, maxDepth);
+    std::vector<std::list<vg::NodeTraversal>> toReturn = bfs_left(graph, flip(node), pathName, nodesPresent, maxDepth);
     
     for(auto& path : toReturn) {
         // Invert the order of every path in palce
@@ -316,15 +320,18 @@ std::vector<std::list<vg::NodeTraversal>> bfs_right(vg::VG& graph,
  * the node in both directions to find a bubble relative to the path, with a
  * consistent orientation. Return the ordered and oriented nodes in the bubble,
  * with the outer nodes being oriented forward along the named path, and with
- * the first node coming before the last node in the reference.
+ * the first node coming before the last node in the reference. Needs a set of
+ * nodes identified as entirely present, so it can search paths using only those
+ * nodes.
  */
 std::vector<vg::NodeTraversal>
-find_bubble(vg::VG& graph, vg::Node* node, const std::string& pathName) {
+find_bubble(vg::VG& graph, vg::Node* node, const std::string& pathName,
+const std::set<int64_t>& nodesPresent) {
 
     // Find paths on both sides, with nodes on the primary path at the outsides
     // and this node in the middle.
-    auto leftPaths = bfs_left(graph, vg::NodeTraversal(node), pathName);
-    auto rightPaths = bfs_right(graph, vg::NodeTraversal(node), pathName);
+    auto leftPaths = bfs_left(graph, vg::NodeTraversal(node), pathName, nodesPresent);
+    auto rightPaths = bfs_right(graph, vg::NodeTraversal(node), pathName, nodesPresent);
     
     // Find a combination of two paths which gets us to the reference in a
     // consistent orientation (meaning that when you look at the ending nodes'
@@ -789,6 +796,23 @@ int main(int argc, char** argv) {
         }
     });
     
+    // Scan through all the nodes and mark the ones that are entirely present.
+    std::set<int64_t> nodesPresent;
+    vg.for_each_node([&](vg::Node* node) {
+        // Determine how many bases of this node are present.
+        size_t basesFound = 0;
+        for(auto& call : callsByNodeOffset[node->id()]) {
+            // For every base in the node, note if it's graph base is present.
+            basesFound += call.graphBasePresent;
+        }
+        
+        if(basesFound == node->sequence().size()) {
+            // All the bases were called present. The whole node is present.
+            nodesPresent.insert(node->id());
+        }
+    });
+    
+    
     // Generate a vcf header. We can't make Variant records without a
     // VariantCallFile, because the variants need to know which of their
     // available info fields or whatever are defined in the file's header, so
@@ -828,6 +852,9 @@ int main(int argc, char** argv) {
         int totalAltsPresent = 0;
         for(auto& call : callsByNodeOffset[node->id()]) {
             // For every base in the node, note if it's graph base is present.
+            // TODO: We can't just use the node presence set because we
+            // distinguish later between nodes with no bases present and nodes
+            // with some bases present.
             graphBasesPresent += call.graphBasePresent;
             
             // And note how many alts are also present.
@@ -947,8 +974,8 @@ int main(int argc, char** argv) {
                     return;
                 }
                 
-                // Look for the bubble
-                std::vector<vg::NodeTraversal> bubble = find_bubble(vg, node, refPathName);
+                // Look for the bubble. We already know that the node we're starting from is present.
+                std::vector<vg::NodeTraversal> bubble = find_bubble(vg, node, refPathName, nodesPresent);
                 
                 if(bubble.size() == 0) {
                     // We couldn't find a way to make a bubble.
