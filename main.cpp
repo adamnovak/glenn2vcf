@@ -24,61 +24,6 @@
 const static int MAX_ALLELE_LENGTH = 4096;
 
 /**
- * Represents our opinion of a particular base in a node in the graph.
- */
-struct BaseCall {
-    // How many alts are allowed?
-    static const int MAX_ALTS = 2;
-
-    // Is the default base here peresnt?
-    bool graphBasePresent = false;
-    // How many alts are here?
-    char numberOfAlts = 0;
-    // What are the actual alt bases?
-    char alts[MAX_ALTS];
-    
-    /**
-     * Create a new BaseCall representing what's going on at this position in
-     * the graph. Uses the calls from the Glenn file (up to two one-character
-     * strings). This constructor is responsible for interpreting the "-" and
-     * "." special call characters.
-     */
-    BaseCall(const std::set<std::string>& altSet) {
-        
-        // We start with no alts.
-        numberOfAlts = 0;
-        // And with no indication that this base is present in the graph.
-        graphBasePresent = false;
-        for(auto alt : altSet) {
-            if(alt == "-") {
-                // This isn't a real alt base. It just means "same as the other
-                // character". Skip it.
-                continue;
-            } else if(alt == ".") {
-                // The occurrence of this character means that the graph's
-                // normal base is actually present.
-                graphBasePresent = true;
-                continue;
-            }
-            // Otherwise we got a real letter.
-            // Make sure we're not going out of bounds
-            assert(alt.size() == 1);
-            assert(numberOfAlts < MAX_ALTS);
-            // Store each alt at the next position in  the array.
-            alts[numberOfAlts] = alt[0];
-            numberOfAlts++;
-        }
-    }
-    
-    /**
-     * Default constructor for being put in a vector.
-     */
-    BaseCall() {
-        // Nothing to do!
-    }
-};
-
-/**
  * Make a letter into a full string because apparently that's too fancy for the
  * standard library.
  */
@@ -152,13 +97,6 @@ bool can_write_alleles(vcflib::Variant& variant) {
  * string in the given variant. 
  */
 int add_alt_allele(vcflib::Variant& variant, const std::string& allele) {
-    for(int i = 0; i < variant.alleles.size(); i++) {
-        if(variant.alleles[i] == allele) {
-            // Already exists
-            return i;
-        }
-    }
-    
     // Copy the allele so we can throw out bad characters
     std::string fixed(allele);
     
@@ -169,11 +107,18 @@ int add_alt_allele(vcflib::Variant& variant, const std::string& allele) {
             fixed[i] = 'N';
         }
     }
+    
+    for(int i = 0; i < variant.alleles.size(); i++) {
+        if(variant.alleles[i] == fixed) {
+            // Already exists
+            return i;
+        }
+    }
 
     // Add it as an alt
-    variant.alt.push_back(allele);
+    variant.alt.push_back(fixed);
     // Make it next in the alleles-by-index list
-    variant.alleles.push_back(allele);
+    variant.alleles.push_back(fixed);
     // Build the reciprocal index-by-allele mapping
     variant.updateAlleleIndexes();
 
@@ -459,6 +404,124 @@ const std::set<int64_t>& nodesPresent) {
     return std::vector<vg::NodeTraversal>();
 }
 
+/**
+ * Holds indexes of the reference: position to node, node to position and
+ * orientation, and the full reference string.
+ */
+struct ReferenceIndex {
+    // Index from node ID to first position on the reference string and
+    // orientation it occurs there.
+    std::map<int64_t, std::pair<size_t, bool>> byId;
+    
+    // Index from start position on the reference to the oriented node that
+    // begins there.  Some nodes may be backward (orientation true) at their
+    // canonical reference positions. In this case, the last base of the node
+    // occurs at the given position.
+    std::map<size_t, vg::NodeTraversal> byStart;
+    
+    // The actual sequence of the reference.
+    std::string sequence;
+};
+
+/**
+ * Trace out the reference path in the given graph named by the given name.
+ * Returns a structure with useful indexes of the reference.
+ */
+ReferenceIndex trace_reference_path(vg::VG& vg, std::string refPathName) {
+    // Make sure the reference path is present
+    assert(vg.paths.has_path(refPathName));
+    
+    // We'll fill this in and then return it.
+    ReferenceIndex index;
+    
+    // We're also going to build the reference sequence string
+    std::stringstream refSeqStream;
+    
+    // What base are we at in the reference
+    size_t referenceBase = 0;
+    
+    // What was the last rank? Ranks must always go up.
+    int64_t lastRank = -1;
+    
+    for(auto mapping : vg.paths.get_path(refPathName)) {
+        // All the mappings need to be perfect matches.
+        assert(mapping_is_perfect_match(mapping));
+    
+        if(!index.byId.count(mapping.position().node_id())) {
+            // This is the first time we have visited this node in the reference
+            // path.
+            
+            // Add in a mapping.
+            index.byId[mapping.position().node_id()] = 
+                std::make_pair(referenceBase, mapping.is_reverse());
+#ifdef debug
+            std::cerr << "Node " << mapping.position().node_id() << " rank " << mapping.rank()
+                << " starts at base " << referenceBase << " with "
+                << vg.get_node(mapping.position().node_id())->sequence() << std::endl;
+#endif
+            
+            // Make sure ranks are monotonically increasing along the path.
+            assert(mapping.rank() > lastRank);
+            lastRank = mapping.rank();
+        }
+        
+        // Find the node's sequence
+        std::string sequence = vg.get_node(mapping.position().node_id())->sequence();
+        
+        while(referenceBase == 0 && sequence.size() > 0 &&
+            (sequence[0] != 'A' && sequence[0] != 'T' && sequence[0] != 'C' &&
+            sequence[0] != 'G' && sequence[0] != 'N')) {
+            
+            // If the path leads with invalid characters (like "X"), throw them
+            // out when computing reference path positions.
+            
+            // TODO: this is a hack to deal with the debruijn-brca1-k63 graph,
+            // which leads with an X.
+            
+            std::cerr << "Warning: dropping invalid leading character "
+                << sequence[0] << " from node " << mapping.position().node_id()
+                << std::endl;
+                
+            sequence.erase(sequence.begin());
+        }
+        
+        if(mapping.is_reverse()) {
+            // Put the reverse sequence in the reference path
+            refSeqStream << vg::reverse_complement(sequence);
+        } else {
+            // Put the forward sequence in the reference path
+            refSeqStream << sequence;
+        }
+            
+        // Say that this node appears here along the reference in this
+        // orientation.
+        index.byStart[referenceBase] = vg::NodeTraversal(
+            vg.get_node(mapping.position().node_id()), mapping.is_reverse()); 
+            
+        // Whether we found the right place for this node in the reference or
+        // not, we still need to advance along the reference path. We assume the
+        // whole node (except any leading bogus characters) is included in the
+        // path (since it sort of has to be, syntactically, unless it's the
+        // first or last node).
+        referenceBase += sequence.size();
+        
+        // TODO: handle leading bogus characters in calls on the first node.
+    }
+    
+    // Create the actual reference sequence we will use
+    index.sequence = refSeqStream.str();
+    
+    // Announce progress.
+    std::cerr << "Traced " << referenceBase << " bp reference path " << refPathName << "." << std::endl;
+    
+    if(index.sequence.size() < 100) {
+        std::cerr << "Reference sequence: " << index.sequence << std::endl;
+    }
+    
+    // Give back the indexes we have been making
+    return index;
+}
+
 void help_main(char** argv) {
     std::cerr << "usage: " << argv[0] << " [options] VGFILE GLENNFILE" << std::endl
         << "Convert a Glenn-format vg graph and variant file pair to a VCF." << std::endl
@@ -472,13 +535,12 @@ void help_main(char** argv) {
         << "    -r, --ref PATH      use the given path name as the reference path" << std::endl
         << "    -c, --contig NAME   use the given name as the VCF contig name" << std::endl
         << "    -g, --gvcf          include lines for non-variant positions" << std::endl
-        << "    -d, --deletions     include reference deletions or replacements with <NON_REF>" << std::endl
-        << "    -b, --bubbles       include nodes on larger inferred bubbles" << std::endl
-        << "    -s, --sampe NAME    name the sample in the VCF with the given name" << std::endl
+        << "    -s, --sample NAME   name the sample in the VCF with the given name" << std::endl
         << "    -o, --offset INT    offset variant positions by this amount" << std::endl
         << "    -h, --help          print this help message" << std::endl;
 }
 
+#define debug
 int main(int argc, char** argv) {
     
     if(argc == 1) {
@@ -496,11 +558,6 @@ int main(int argc, char** argv) {
     std::string sampleName = "SAMPLE";
     // Should we output lines for all the reference positions that do exist?
     bool announceNonVariant = false;
-    // Should we include deletions from the reference when the reference base
-    // isn't noted as present?
-    bool announceDeletions = false;
-    // Should arbitrarily find long expanded bubbles for non-anchored nodes?
-    bool useBubbles = false;
     // How far should we offset positions of variants?
     int64_t variantOffset = 0;
     
@@ -511,8 +568,6 @@ int main(int argc, char** argv) {
             {"ref", required_argument, 0, 'r'},
             {"contig", required_argument, 0, 'c'},
             {"gvcf", no_argument, 0, 'g'},
-            {"deletions", no_argument, 0, 'd'},
-            {"bubbles", no_argument, 0, 'b'},
             {"sample", required_argument, 0, 's'},
             {"offset", required_argument, 0, 'o'},
             {"help", no_argument, 0, 'h'},
@@ -521,7 +576,7 @@ int main(int argc, char** argv) {
 
         int optionIndex = 0;
 
-        char option = getopt_long(argc, argv, "r:c:gdbs:o:h", longOptions, &optionIndex);
+        char option = getopt_long(argc, argv, "r:c:gs:o:h", longOptions, &optionIndex);
         switch(option) {
         // Option value is in global optarg
         case 'r':
@@ -535,14 +590,6 @@ int main(int argc, char** argv) {
         case 'g':
             // Say we need to announce non-variant ref positions
             announceNonVariant = true;
-            break;
-        case 'd':
-            // Say we need to announce deleted ref positions
-            announceDeletions = true;
-            break;
-         case 'b':
-            // Say we should admit inferred large bubbles
-            useBubbles = true;
             break;
         case 's':
             // Set the sample name
@@ -604,123 +651,22 @@ int main(int argc, char** argv) {
             << std::endl;
     }
     
-    // Make sure the reference path is present
-    assert(vg.paths.has_path(refPathName));
-    
-    // Trace the reference path, and assign each node a canonical reference
-    // range. The first base of the node occurs at the given position in the
-    // reference. Some nodes may be backward (orientation true) at their
-    // canonical reference positions. In this case, the last base of the node
-    // occurs at the given position.
-    std::map<int64_t, std::pair<size_t, bool>> referencePositionAndOrientation;
-    
-    // We're also going to build the reference sequence string
-    std::stringstream refSeqStream;
-    
-    // We also need to be able to map any node start position in the reference
-    // to the NodeTraversal that lives there.
-    std::map<size_t, vg::NodeTraversal> nodesByReference;
-    
-    // We're going to need to note which reference nodes have had copy number
-    // taken from them by being bypassed by a present alt. We're not going to do
-    // it in a way that's clever enough to resolve multiple reference
-    // occurrences smartly, but we're going to do it. This maps from reference
-    // node ID to total copy number of that node used by bypassing alts.
-    // We also use this to note alts that have had copy number used by other
-    // bubbles.
-    std::map<int64_t, int64_t> copynumberUsedByAlts;
-    
-    // What base are we at in the reference
-    size_t referenceBase = 0;
-    
-    // What was the last rank? Ranks must always go up.
-    int64_t lastRank = -1;
-    
-    for(auto mapping : vg.paths.get_path(refPathName)) {
-        // All the mappings need to be perfect matches.
-        assert(mapping_is_perfect_match(mapping));
-    
-        if(!referencePositionAndOrientation.count(mapping.position().node_id())) {
-            // This is the first time we have visited this node in the reference
-            // path.
-            
-            // Add in a mapping.
-            referencePositionAndOrientation[mapping.position().node_id()] = 
-                std::make_pair(referenceBase, mapping.is_reverse());
-#ifdef debug
-            std::cerr << "Node " << mapping.position().node_id() << " rank " << mapping.rank()
-                << " starts at base " << referenceBase << " with "
-                << vg.get_node(mapping.position().node_id())->sequence() << std::endl;
-#endif
-            
-            // Make sure ranks are monotonically increasing along the path.
-            assert(mapping.rank() > lastRank);
-            lastRank = mapping.rank();
-        }
-        
-        // Find the node's sequence
-        std::string sequence = vg.get_node(mapping.position().node_id())->sequence();
-        
-        while(referenceBase == 0 && sequence.size() > 0 &&
-            (sequence[0] != 'A' && sequence[0] != 'T' && sequence[0] != 'C' &&
-            sequence[0] != 'G' && sequence[0] != 'N')) {
-            
-            // If the path leads with invalid characters (like "X"), throw them
-            // out when computing reference path positions.
-            
-            // TODO: this is a hack to deal with the debruijn-brca1-k63 graph,
-            // which leads with an X.
-            
-            std::cerr << "Warning: dropping invalid leading character "
-                << sequence[0] << " from node " << mapping.position().node_id()
-                << std::endl;
-                
-            sequence.erase(sequence.begin());
-        }
-        
-        if(mapping.is_reverse()) {
-            // Put the reverse sequence in the reference path
-            refSeqStream << vg::reverse_complement(sequence);
-        } else {
-            // Put the forward sequence in the reference path
-            refSeqStream << sequence;
-        }
-            
-        // Say that this node appears here along the reference in this
-        // orientation.
-        nodesByReference[referenceBase] = vg::NodeTraversal(
-            vg.get_node(mapping.position().node_id()), mapping.is_reverse()); 
-            
-        // All reference nodes start out with no copy number used by alts.
-        copynumberUsedByAlts[mapping.position().node_id()] = 0;
-        
-        // Whether we found the right place for this node in the reference or
-        // not, we still need to advance along the reference path. We assume the
-        // whole node (except any leading bogus characters) is included in the
-        // path (since it sort of has to be, syntactically, unless it's the
-        // first or last node).
-        referenceBase += sequence.size();
-        
-        // TODO: handle leading bogus characters in calls on the first node.
-    }
-    
-    // Create the actual reference sequence we will use
-    std::string refSeq(refSeqStream.str());
-    
-    // Announce progress.
-    std::cerr << "Traced " << referenceBase << " bp reference path " << refPathName << "." << std::endl;
-    
-    if(refSeq.size() < 100) {
-        std::cerr << "Reference sequence: " << refSeq << std::endl;
-    }
+    // Follow the reference path and extract indexes we need: index by node ID,
+    // index by node start, and the reconstructed path sequence.
+    ReferenceIndex index = trace_reference_path(vg, refPathName);
     
     // Open up the Glenn-file
     std::ifstream glennStream(glennFile);
     
-    // Parse it into an internal format, where we keep track of whether bases
-    // exist or not.
-    // Stores call info for a position by graph node and index in the node.    
-    std::map<int64_t, std::vector<BaseCall>> callsByNodeOffset;
+    // Parse it into an internal format, where we track status and copy number
+    // for nodes and edges.
+    
+    // This holds copy numbers for all the nodes we have copy numbers called
+    // for, by the node pointer in the vg graph.
+    std::map<vg::Node*, int> nodeCopyNumbers;
+    // This holds all the edges that are deletions, by the pointer to the stored
+    // Edge object in the VG graph
+    std::set<vg::Edge*> deletionEdges;
     
     // Loop through all the lines
     std::string line;
@@ -735,92 +681,104 @@ int main(int argc, char** argv) {
         // Make a stringstream to read out tokens
         std::stringstream tokens(line);
         
-        // Read the node id
-        int64_t nodeId;
-        tokens >> nodeId;
+        // Read the kind of line this is ("N"ode or "E"dge)
+        std::string lineType;
+        tokens >> lineType; 
         
-        // Read the offset
-        size_t offset;
-        tokens >> offset;
-        offset--; // Make it 0-based
-        
-        // Read the base that the graph has at this position
-        char graphBase;
-        tokens >> graphBase;
-        
-        if(vg.get_node(nodeId)->sequence().size() <= offset) {
-            throw std::runtime_error("Node " + std::to_string(nodeId) + " offset " +
-                std::to_string(offset) + " is out of range on " +
-                std::to_string(vg.get_node(nodeId)->sequence().size()) + " bp node");
-        }
-        
-        // TODO: make sure the graph we're using agrees with the reference base.
-        if(vg.get_node(nodeId)->sequence()[offset] != graphBase) {
-            throw std::runtime_error("Node " + std::to_string(nodeId) + " offset " +
-                std::to_string(offset) + " is " + char_to_string(vg.get_node(nodeId)->sequence()[offset]) +
-                " and not " + graphBase);
-        }
-        
-        // Read the call string
-        std::string call;
-        tokens >> call;
-        
-        // Split that out into a set of call character strings. This is how we
-        // split on commas in C++. Ask for the non-matched parts of a regex
-        // iterator that matches commas.
-        std::set<std::string> callCharacters(std::sregex_token_iterator(
-            call.begin(), call.end(), std::regex(","), -1),
-            std::sregex_token_iterator());
-        
-        // Fill in the callsByNodeOffset map for this base of this node.
-        
-        if(callsByNodeOffset[nodeId].size() <= offset) {
-            // Make sure there's room in the vector
-            callsByNodeOffset[nodeId].resize(offset + 1);
-        }
-        
-        // Interpret the meaning of the -,. or A,C type character pairs that
-        // Glenn is using.
-        callsByNodeOffset[nodeId][offset] = BaseCall(callCharacters);
-
+        if(lineType == "N") {
+            // This is a line about a node
+            
+            // Read the node ID
+            int64_t nodeId;
+            tokens >> nodeId;
+            
+            if(!vg.has_node(nodeId)) {
+                throw std::runtime_error("Invalid node: " + std::to_string(nodeId));
+            }
+            
+            // What kind of call is it? We only care that it isn't "U"ncalled
+            std::string callType;
+            tokens >> callType;
+            
+            if(callType == "U") {
+                // This node has no called copy number
 #ifdef debug
-        std::cerr << "Node " << nodeId << " base " << offset << " status: "
-            << (callsByNodeOffset[nodeId][offset].graphBasePresent ? "Present" : "Absent")
-            << std::endl;
+                std::cerr << "Uncalled node: " << nodeId << endl;
 #endif
+                // Handle the next line
+                continue;
+            }
+            
+            // Read the copy number
+            int copyNumber;
+            tokens >> copyNumber;
+            
+            assert(0 <= copyNumber);
+            assert(copyNumber <= 2);
+            
+#ifdef debug
+            std::cerr << "Node " << nodeId << " has copy number " << copyNumber << endl;
+#endif
+            
+            // Save it
+            nodeCopyNumbers[vg.get_node(nodeId)] = copyNumber;
+            
+        } else if(lineType == "E") {
+        
+            // Read the edge data
+            std::string edgeDescription;
+            tokens >> edgeDescription;
+            
+            // Split on commas. We'd just iterate the regex iterator ourselves,
+            // but it seems to only split on the first comma if we do that.
+            std::vector<string> parts;
+            std::copy(std::sregex_token_iterator(edgeDescription.begin(), edgeDescription.end(), std::regex(","), -1), std::sregex_token_iterator(), std::back_inserter(parts));
+            
+            // We need the four fields to describe an edge.
+            assert(parts.size() == 4);
+            
+            // Parse the from node
+            int64_t from = std::stoll(parts[0]);
+            // And the from_start flag
+            bool fromStart = std::stoi(parts[1]);
+            // Make a NodeSide for the from side
+            vg::NodeSide fromSide(from, !fromStart);
+            // Parse the to node
+            int64_t to = std::stoll(parts[2]);
+            // And the to_end flag
+            bool toEnd = std::stoi(parts[3]);
+            // Make a NodeSide for the to side
+            vg::NodeSide toSide(to, toEnd);
+            
+            if(!vg.has_edge(std::make_pair(fromSide, toSide))) {
+                // Ensure we really have that edge
+                throw std::runtime_error("Edge " + edgeDescription + " not in graph.");
+            }
+            
+            // Parse the mode
+            std::string mode;
+            tokens >> mode;
+            
+            if(mode == "L") {
+                // This is a deletion edge
+#ifdef debug
+                std::cerr << "Edge " << edgeDescription << " is a deletion." << endl;
+#endif
+                
+                // Say it's a deletion
+                deletionEdges.insert(vg.get_edge(std::make_pair(fromSide, toSide)));
+
+            }
+        
+        } else {
+            // This is not a real kind of line
+            throw std::runtime_error("Unknown line type: " + lineType);
+        }
+        
+        
+        
+        
     }
-    
-    
-    vg.for_each_node([&](vg::Node* node) {
-        // Make sure we have all the calls we need (one per base)
-        if(!callsByNodeOffset.count(node->id())) {
-            // This node isn't called. Complain and compensate.
-            std::cerr << "WARNING: Uncalled node: " << std::to_string(node->id()) << std::endl;
-            callsByNodeOffset[node->id()].resize(node->sequence().size());
-        }
-        
-        if(callsByNodeOffset[node->id()].size() != node->sequence().size()) {
-            // All nodes are called to sufficient length
-            std::cerr << "WARNING: Calls for node are too short: " << std::to_string(node->id()) << std::endl;
-            callsByNodeOffset[node->id()].resize(node->sequence().size());
-        }
-    });
-    
-    // Scan through all the nodes and mark the ones that are entirely present.
-    std::set<int64_t> nodesPresent;
-    vg.for_each_node([&](vg::Node* node) {
-        // Determine how many bases of this node are present.
-        size_t basesFound = 0;
-        for(auto& call : callsByNodeOffset[node->id()]) {
-            // For every base in the node, note if it's graph base is present.
-            basesFound += call.graphBasePresent;
-        }
-        
-        if(basesFound == node->sequence().size()) {
-            // All the bases were called present. The whole node is present.
-            nodesPresent.insert(node->id());
-        }
-    });
     
     
     // Generate a vcf header. We can't make Variant records without a
@@ -828,7 +786,7 @@ int main(int argc, char** argv) {
     // available info fields or whatever are defined in the file's header, so
     // they know what to output.
     std::stringstream headerStream;
-    write_vcf_header(headerStream, sampleName, contigName, refSeq.size() + variantOffset);
+    write_vcf_header(headerStream, sampleName, contigName, index.sequence.size() + variantOffset);
     
     // Load the headers into a new VCF file object
     vcflib::VariantCallFile vcf;
@@ -845,834 +803,20 @@ int main(int argc, char** argv) {
     // We need to track the bases lost.
     size_t basesLost = 0;
     
+    // TODO: look at every deletion edge and spit out variants for them.
+    // Complain and maybe remember if they don't connect two primary path nodes.
+    
     vg.for_each_node([&](vg::Node* node) {
         // Look at every node in the graph and spit out variants for the ones
-        // that are non-reference, but attached to two reference nodes and are
-        // called as present.
+        // that are non-reference, but for which we can push copy number to the
+        // reference path, greedily.
     
         // Ensure this node is nonreference
-        if(referencePositionAndOrientation.count(node->id())) {
+        if(index.byId.count(node->id())) {
             // Skip reference nodes
             return;
         }
         
-        // Determine how many bases of this node are present.
-        size_t graphBasesPresent = 0;
-        // Determine how many alt calls on the node are also present.
-        int totalAltsPresent = 0;
-        for(auto& call : callsByNodeOffset[node->id()]) {
-            // For every base in the node, note if it's graph base is present.
-            // TODO: We can't just use the node presence set because we
-            // distinguish later between nodes with no bases present and nodes
-            // with some bases present.
-            graphBasesPresent += call.graphBasePresent;
-            
-            // And note how many alts are also present.
-            totalAltsPresent += call.numberOfAlts;
-        }
-        
-        if(totalAltsPresent > 0) {
-            // This node is present, but it has alts we should call on it and
-            // won't.
-            std::cerr << "Node " << node->id() <<" has " << totalAltsPresent << " bp additional novel alts!" << std::endl;
-                
-            // TODO: we leave the node in, because at least one copy of it
-            // exists, but we might end up calling it homozygous when really we
-            // have one of it and one of a modified version of it.
-            // We lose these extra alt bases no matter what happens now.
-            basesLost += totalAltsPresent;
-        }
-        
-        if(graphBasesPresent == 0) {
-            // This node isn't used at all in this sample, so ignore it.
-            // We lose alts if it somehow had any.
-            return;
-        }
-        
-        if(graphBasesPresent < node->sequence().size()) {
-            // We shouldn't call this as a variant; they're not even
-            // heterozygous this alt.
-            std::cerr << "Node " << node->id() << " has only "
-                << graphBasesPresent << "/" << node->sequence().size()
-                << " present. Skipping!" << std::endl;
-            // We lose the bases that were there.
-            basesLost += graphBasesPresent;
-            return;
-        }
-        
-        // Ensure this node attaches to two reference nodes, with correct
-        // orientations.
-        
-        // Get all the oriented nodes to the left of this one's local forward.
-        vector<vg::NodeTraversal> prevNodes;
-        vg.nodes_prev(vg::NodeTraversal(node), prevNodes);
-        
-        // Find the leftmost reference node we're attached to at our start.
-        size_t leftmostInPosition = (size_t) -1;
-        vg::NodeTraversal leftmostInNode;
-        
-        for(auto& candidate : prevNodes) {
-            // Look it up in the reference
-            auto found = referencePositionAndOrientation.find(candidate.node->id());
-            if(found == referencePositionAndOrientation.end()) {
-                // We only care about nodes that actually are in the reference
-                continue;
-            }
-            
-            if((*found).second.first < leftmostInPosition) {
-                // Take this as our new leftmost way into this node from the
-                // reference. We know the reference positions are strictly
-                // ordered, so orientation in the reference doesn't matter here.
-                leftmostInNode = candidate;
-                leftmostInPosition = (*found).second.first;
-            }
-        }
-        
-        // Get all the oriented nodes to the right of this one's local forward.
-        vector<vg::NodeTraversal> nextNodes;
-        vg.nodes_next(vg::NodeTraversal(node), nextNodes);
-        
-        // Find the leftmost reference node we're attached to at our end.
-        size_t leftmostOutPosition = (size_t) -1;
-        vg::NodeTraversal leftmostOutNode;
-        
-        for(auto& candidate : nextNodes) {
-            // Look it up in the reference
-            auto found = referencePositionAndOrientation.find(candidate.node->id());
-            if(found == referencePositionAndOrientation.end()) {
-                // We only care about nodes that actually are in the reference
-                continue;
-            }
-            
-            if((*found).second.first < leftmostOutPosition) {
-                // Take this as our new leftmost way into this node from the
-                // reference. We know the reference positions are strictly
-                // ordered, so orientation in the reference doesn't matter here.
-                leftmostOutNode = candidate;
-                leftmostOutPosition = (*found).second.first;
-            }
-        }
-        
-        // We're going to fill in these variables to describe a single- or
-        // multi-node bubble.
-        // Start of the interval we replace on the reference
-        size_t referenceIntervalStart;
-        // Past-the-end position of the interval we replace on the reference
-        size_t referenceIntervalPastEnd;
-        
-        // Oriented nodes we're replacing that interval with (from which alleles
-        // will be derived)
-        std::vector<vg::NodeTraversal> newNodes;
-        
-        // Now check the above to make sure we're actually placed in a
-        // consistent place in the reference. We need to be able to read along
-        // the reference forward, into this node, and out the other end into the
-        // reference later in the same orientation.
-        if(leftmostInNode.node == nullptr || leftmostOutNode.node == nullptr) {
-            if(useBubbles) {
-                // Try and find a bubble that lets us place the node, and then
-                // say the whole bubble exists due to the node. TODO: this can
-                // have us asserting nodes we shouldn't assert when the nodes we
-                // do assert would allow a different bubble.
-                
-                if(copynumberUsedByAlts.count(node->id()) && copynumberUsedByAlts.at(node->id()) > 0) {
-                    // This node has already had some copy number accounted for
-                    // in another bubble. TODO: Just assume it's genotype was
-                    // correct there. There's no way to go back and assert it as
-                    // homozygous when it was already called het in a bubble,
-                    // for example.
-                    return;
-                }
-                
-                // Look for the bubble. We already know that the node we're starting from is present.
-                std::vector<vg::NodeTraversal> bubble = find_bubble(vg, node, refPathName, nodesPresent);
-                
-                if(bubble.size() == 0) {
-                    // We couldn't find a way to make a bubble.
-                    std::cerr << "Node " << node->id() << " not part of bubble." << std::endl;
-                    // We lose the bases we wanted to represent.
-                    basesLost += graphBasesPresent;
-                    return;
-                }
-                
-                // Otherwise we have a bubble we can use.
-                
-                // TODO: ensure all the nodes we're tagging here are supposed to
-                // be present, and try other bubbles if they aren't. TODO: once
-                // we call the whole bubble for one of these nodes, don't call
-                // it again for other nodes.
-                
-                // Where do we start along the reference?
-                
-                // The position we have stored for this start node is the first
-                // position along the reference at which it occurs. Our bubble
-                // goes forward in the reference, so we must come out of the
-                // opposite end of the node from the one we have stored.
-                referenceIntervalStart = referencePositionAndOrientation.at(bubble.front().node->id()).first +
-                    bubble.front().node->sequence().size();
-                
-                // The position we have stored for the end node is the first
-                // position it occurs in the reference, and we know we go into
-                // it in a reference-concordant direction, so we must have our
-                // past-the-end position right there.
-                referenceIntervalPastEnd = referencePositionAndOrientation.at(bubble.back().node->id()).first;
-                
-                for(size_t i = 1; i < bubble.size() - 1; i++) {
-                    // Stick in all the non-anchoring nodes, dropping the first and last anchoring nodes.
-                    newNodes.push_back(bubble[i]);
-                }
-                
-            } else {
-                // We're missing a reference node on one side, and we can't do longer bubbles.
-                std::cerr << "Node " << node->id() << " not anchored to reference." << std::endl;
-                // We lose the bases we wanted to represent.
-                basesLost += graphBasesPresent;
-                return;
-            }
-        } else {
-            // We can proceed with a single-node bubble.
-        
-            // Determine if we read into this node forward along the reference
-            // (true) or backward along the reference (false). If we found the node
-            // to our left in the same orientation as it occurs in the reference,
-            // then we do read in forward.
-            bool readInForward = leftmostInNode.backward == referencePositionAndOrientation.at(leftmostInNode.node->id()).second;
-            
-            // If we found the node to our right in the same orientation as it
-            // occurs in the reference, then we do read out forward as well.
-            bool readOutForward = leftmostOutNode.backward == referencePositionAndOrientation.at(leftmostOutNode.node->id()).second;
-            
-            if(readInForward != readOutForward) {
-                // Going through this node would cause us to invert the direction
-                // we're traversing the reference in.
-                std::cerr << "Node " << node->id() << " inverts reference path." << std::endl;
-                // We lose the bases we wanted to represent.
-                basesLost += graphBasesPresent;
-                return;
-            }
-            
-            // We need to work out what orientation we have relative to the
-            // reference.
-            vg::NodeTraversal altNode(node);
-            
-            if(!readInForward) {
-                // We have a consistent orientation, but it's backward!
-                // Swap the in and out nodes, and traverse our node in reverse.
-                altNode.backward = true;
-                std::swap(leftmostInNode, leftmostOutNode);
-            }
-            
-            // Now we know that the in node really is where we come into the alt,
-            // and the out node really is where we leave the alt, when reading along
-            // the reference path. Either may still be backward in the reference
-            // path, though.
-            
-            // Work out where and how they are positioned in the reference
-            auto& inNodePlacement = referencePositionAndOrientation.at(leftmostInNode.node->id());
-            auto& outNodePlacement = referencePositionAndOrientation.at(leftmostOutNode.node->id());
-            
-            if(outNodePlacement.first <= inNodePlacement.first) {
-                // We're perfectly fine, orientation-wise, except we let you time
-                // travel and leave before you arrived.
-                std::cerr << "Node " << node->id() << " allows duplication." << std::endl;
-                // We lose the bases we wanted to represent.
-                basesLost += graphBasesPresent;
-                return;
-            }
-            
-            // So what are the actual bounds of the reference interval covered by
-            // the node? Since the node placement positions are just the first bases
-            // along the reference at which the nodes occur, we don't care about
-            // orientation of the anchoring node sequences.
-            referenceIntervalStart = inNodePlacement.first + leftmostInNode.node->sequence().size();
-            referenceIntervalPastEnd = outNodePlacement.first;
-            
-            // Just one node
-            newNodes.push_back(altNode);
-        }
-        
-        
-        // Make sure we got reasonable bounds whatever kind of bubble we have.
-        assert(referenceIntervalPastEnd >= referenceIntervalStart);
-        
-        // How long is this interval in the reference?
-        size_t referenceIntervalSize = referenceIntervalPastEnd - referenceIntervalStart;
-        
-        // Trace the reference between our in node and our out node.
-        size_t refPosition = referenceIntervalStart;
-        
-        // We want to know if the reference path opposite us is ever called as
-        // present or has a novel SNP. If so, since we're present, we know we
-        // must be heterozygous here. If not, we'll call ourselves homozygous
-        // here. TODO: catch conflicts between homozygous non-reference mutually
-        // exclusive variants.
-        // This is false by default; we assume it's missing and can be proven wrong.
-        // TODO: this makes us call insertions as homozygous.
-        bool refPathExists = false;
-        
-        while(refPosition < referenceIntervalPastEnd) {
-            // While we aren't at the start of the reference node that comes
-            // after this alt...
-            
-            // Get the node starting here in the reference.
-            if(!nodesByReference.count(refPosition)) {
-                std::cerr << "Missing node at reference position " << refPosition << std::endl;
-                throw std::runtime_error("Reference position incorrect");
-            }
-            vg::Node* refNode = nodesByReference.at(refPosition).node;
-            
-            // We know we can iterate over the whole reference node, because it
-            // must start immediatelty after the previous node ends.
-            for(int i = 0; i < refNode->sequence().size(); i++) {
-                // See if the reference node is ever called as absent with no
-                // novel SNP alt.
-                
-                auto& call = callsByNodeOffset[refNode->id()][i];
-                if(call.graphBasePresent || call.numberOfAlts > 0) {
-                    // We found evidence the reference exists in alternation
-                    // with this allele.
-                    refPathExists = true;
-                }
-            }
-            
-            // Advance to the start of the next reference node
-            refPosition += refNode->sequence().size();
-        }
-        
-        // Tell the reference nodes that we're using their copy number, so if
-        // they turn up missing but were bypassed by an alt they don't act
-        // deleted.
-        refPosition = referenceIntervalStart;
-        while(refPosition < referenceIntervalPastEnd) {
-            // While we aren't at the start of the reference node that comes
-            // after this alt...
-            
-            // Get the node starting here in the reference.
-            if(!nodesByReference.count(refPosition)) {
-                std::cerr << "Missing node at reference position " << refPosition << std::endl;
-                throw std::runtime_error("Reference position incorrect");
-            }
-            vg::Node* refNode = nodesByReference.at(refPosition).node;
-            
-            // If we saw any of the reference path existing, we use 1 copy
-            // number. Otherwise we use 2. Note that this can end up using >2
-            // copy number from a node if multiple alts bypass it, or if one alt
-            // bypasses it twice.
-            copynumberUsedByAlts[refNode->id()] += (refPathExists ? 1 : 2);
-                        
-            // Advance to the start of the next reference node
-            refPosition += refNode->sequence().size();
-        }
-        
-        // Make a Variant
-        vcflib::Variant variant;
-        variant.sequenceName = contigName;
-        variant.setVariantCallFile(vcf);
-        variant.quality = 0;
-        
-        // Pull out the string for the reference allele
-        std::string refAllele = refSeq.substr(referenceIntervalStart, referenceIntervalSize);
-        // And for the alt allele
-        std::stringstream altAlleleStream;
-        
-        for(auto& addedNode : newNodes) {
-            // For each node we're adding in, stick in the sequence in the
-            // correct orientation
-            std::string addedSequence = addedNode.node->sequence();
-            
-            if(addedNode.backward) {
-                // If the node is traversed backward, we need to flip its sequence.
-                addedSequence = vg::reverse_complement(addedSequence);
-            }
-            
-            // Stick the sequence
-            altAlleleStream << addedSequence;
-            
-            // Also account for use of this node's copy number, so we won't go
-            // and use it to create its own bubble.
-            if(!copynumberUsedByAlts.count(addedNode.node->id())) {
-                // If the node has no copy number tally, make some space.
-                copynumberUsedByAlts[addedNode.node->id()] = 0;
-            }
-            
-            // Whether the reference path exists or not, we use 2 copy number
-            // here between the ref and the bubble
-            copynumberUsedByAlts[addedNode.node->id()] += 2;
-            
-            if(copynumberUsedByAlts[addedNode.node->id()] > 2) {
-                // If we end up doing this multiple times for a node, complain
-                // to the user, because we may not quite be correct in our
-                // conversion.
-                std::cerr << "Warning: Node " << addedNode.node->id() << " used by multiple bubbles!" << std::endl;
-            }
-        }
-        
-        // Convert to a proper string
-        std::string altAllele(altAlleleStream.str());
-        
-        if(refAllele.size() == 0) {
-            // Shift everybody left by 1 base for the anchoring base that VCF
-            // requires for insertions.
-            assert(referenceIntervalStart != 0);
-            referenceIntervalStart--;
-            referenceIntervalSize++;
-            // Add that base to the start of both alleles.
-            refAllele = refSeq[referenceIntervalStart] + refAllele;
-            altAllele = refSeq[referenceIntervalStart] + altAllele;
-        }
-        
-        // Alt allele size can't be 0, no need to do the same shift for
-        // deletions
-        
-        // Set the variant position. Convert to 1-based.
-        variant.position = referenceIntervalStart + 1 + variantOffset;
-        
-        // Name it with the node numbers we're saying exist.
-        std::stringstream idStream;
-        for(size_t i = 0; i < newNodes.size(); i++) {
-            idStream << std::to_string(newNodes[i].node->id());
-            if(i != newNodes.size() - 1) {
-                // Add a separator
-                idStream << "_";
-            }
-        }
-        variant.id = idStream.str();
-        
-        // Initialize the ref allele
-        create_ref_allele(variant, refAllele);
-        
-        // Add the graph version
-        int altNumber = add_alt_allele(variant, altAllele);
-        
-        // Say we're going to spit out the genotype for this sample.        
-        variant.format.push_back("GT");
-        auto& genotype = variant.samples[sampleName]["GT"];
-        
-        // Make it hom/het as appropriate
-        if(refPathExists) {
-            // We're allele alt and ref heterozygous.
-            genotype.push_back(std::to_string(altNumber) + "/0");
-        } else {
-            // We're alt homozygous, other overlapping variants notwithstanding.
-            genotype.push_back(std::to_string(altNumber) + "/" + std::to_string(altNumber));
-        }
-
-#ifdef debug
-        std::cerr << "Found variant " << refAllele << " -> " << altAllele
-            << " caused by node " << altNode.node->id()
-            << " at 1-based reference position " << variant.position
-            << std::endl;
-#endif
-
-        if(can_write_alleles(variant)) {
-            // Output the created VCF variant.
-            std::cout << variant << std::endl;
-        } else {
-            std::cerr << "Variant is too large" << std::endl;
-            basesLost += altAllele.size();
-        }
-    });
-    
-    vg.for_each_node([&](vg::Node* node) {
-        // Now we go through all the nodes on the reference path, and add in
-        // SNPs on them.
-        
-        if(!referencePositionAndOrientation.count(node->id())) {
-            // Skip non-reference nodes
-            return;
-        }
-        
-        // How many bases on this node are present?
-        size_t basesPresent = 0;
-        for(int i = 0; i < node->sequence().size(); i++) {
-            auto& call = callsByNodeOffset[node->id()][i];
-            if(call.graphBasePresent) {
-                basesPresent++;
-            }
-        }
-        
-        // This gets set if there's a running deletion of several bases in a row
-        // from a ref node that is otherwise present. It makes it less obvious
-        // that you can't just declare a deletion without considering the
-        // surrounding bases (we still might say G -> C and GATTTT -> G about
-        // the same G).
-        int64_t runningDelStart = -1;
-        
-        for(int i = 0; i < node->sequence().size(); i++) {
-            // Are we continuing a running deletion?
-            bool runningDelContinues = false;
-        
-            // Where are we in node local coordinates?
-            int positionOnNode;
-        
-            // Work out where it is in the reference
-            size_t referencePosition = referencePositionAndOrientation.at(node->id()).first + i;
-            if(referencePositionAndOrientation.at(node->id()).second) {
-                // We're backward in the reference, so incrementing i goes
-                // towards the node's index 0
-                positionOnNode = (node->sequence().size() - i - 1);
-            } else {
-                // We're forward in the reference, so incrementing i goes
-                // towards the node's max index.
-                positionOnNode = i;
-            }
-        
-            // We need to keep track of the alts present.
-            std::set<int> altNumbersPresent;
-        
-            // For each position along the node, grab the call there.
-            auto& call = callsByNodeOffset[node->id()][positionOnNode];
-            if(call.numberOfAlts > 0) {
-                // At least one alt is present here.
-                // Make the variant.
-                
-                // Make a Variant
-                vcflib::Variant variant;
-                variant.sequenceName = contigName;
-                variant.setVariantCallFile(vcf);
-                variant.quality = 0;
-                
-                // Grab its reference base
-                std::string refAllele = char_to_string(refSeq[referencePosition]);
-                // Initialize the ref allele
-                create_ref_allele(variant, refAllele);
-                
-                // Add in alt bases, with the right orientation
-                for(int j = 0; j < call.numberOfAlts; j++) {
-                    std::string altAllele = char_to_string(call.alts[j]);
-                    if(referencePositionAndOrientation.at(node->id()).second) {
-                        // We need to flip the orientation to reference
-                        // orientation
-                        altAllele = vg::reverse_complement(altAllele);
-                    }
-                    // Add the novel SNP allele
-                    altNumbersPresent.insert(add_alt_allele(variant, altAllele));
-                }
-                
-                if(altNumbersPresent.count(0)) {
-                    // We found an alt that actually matches ref. Make sure it's represented as ref instead.
-                    altNumbersPresent.erase(altNumbersPresent.find(0));
-                    call.graphBasePresent = true;
-                    std::cerr << "ERROR: Found alt equal to reference. Correcting." << std::endl;
-                    // TODO: see if we have something silly like an off by 1 error? Throw an error here?
-                }
-                
-                // Set the variant position. Convert to 1-based.
-                variant.position = referencePosition + 1 + variantOffset;
-                
-                // Cram the node and offset into the variant ID column, for these point variants
-                variant.id = std::to_string(node->id()) + "." + std::to_string(positionOnNode);
-                
-                // Say we're going to spit out the genotype for this sample.        
-                variant.format.push_back("GT");
-                auto& genotype = variant.samples[sampleName]["GT"];
-                
-                // Make it hom/het as appropriate
-                if(call.graphBasePresent) {
-                    if(altNumbersPresent.size() > 0) {
-                        // We have the ref and we also have an alt.
-                        genotype.push_back("1/0");
-                    } else {
-                        // We have the ref and no alts distinct from it showed
-                        // up. Should not happen because we already made sure
-                        // call.numberOfAlts > 0
-                        std::cerr << "ERROR: Found no alts when alts should exist" << std::endl;
-                        genotype.push_back("0/0");
-                    }
-                } else if(altNumbersPresent.size() == 1) {
-                    // We have only one alt allele, and no reference.
-                    if(copynumberUsedByAlts[node->id()] == 0) {
-                        // We still have all our copy number, but we aren't
-                        // present. Give it all to the alt.
-                        genotype.push_back("1/1");
-                    } else {
-                        // We're in alternation with one or more alts that took
-                        // our copy number. Call this base as het, where the
-                        // "ref" side might already have been replaced.
-                        // TODO: should we make haploid calls here?
-                        genotype.push_back("1/0");
-                    }
-                } else if(altNumbersPresent.size() == 2) {
-                    // We have two alt alleles and no reference. We must have
-                    // both present.
-                    genotype.push_back("1/2");
-                } else {
-                    // This should never happen
-                    throw std::runtime_error("Semantically invalid BaseCall");
-                }
-
-#ifdef debug
-                std::cerr << "Found  alt-bearing variant " << refAllele << " -> ";
-                for(int j = 0; j < call.numberOfAlts; j++) {
-                    std::cerr << call.alts[j] << ",";
-                }
-                std::cerr << " on node " << node->id()
-                    << " at 1-based reference position " << variant.position
-                    << std::endl;
-#endif
-                    
-                if(can_write_alleles(variant)) {
-                    // Output the created VCF variant.
-                    std::cout << variant << std::endl;
-                } else {
-                    std::cerr << "Variant is too large" << std::endl;
-                    basesLost += altNumbersPresent.size();
-                }
-            } else if(!call.graphBasePresent) {
-                // This reference base isn't present at all!
-                if(copynumberUsedByAlts[node->id()] < 2 && announceDeletions) {
-                    // All the copy number we would expect to see hasn't been
-                    // used up by alts bypassing this base, and we want to hear
-                    // about deletions. We need to say it's missing.
-                    
-                    if(basesPresent == 0) {
-                        // The whole node is missing! And we don't know where it
-                        // went! Give a generic NON_REF GVCF answer.
-                        
-                        
-                        // We need to work out what the ref (present) and
-                        // alt (missing) alleles will be.
-                        std::string refAllele = refSeq.substr(referencePosition, 1);
-                        std::string altAllele = "<NON_REF>";
-                        
-                        // Make a Variant
-                        vcflib::Variant variant;
-                        variant.sequenceName = contigName;
-                        variant.setVariantCallFile(vcf);
-                        variant.quality = 0;
-                        
-                        // Cram the node and offset into the variant ID column, for these point variants
-                        variant.id = std::to_string(node->id()) + "." + std::to_string(positionOnNode);
-                        
-                        // Initialize the ref allele
-                        create_ref_allele(variant, refAllele);
-                        
-                        // Add the novel deletion allele
-                        int altNumber = add_alt_allele(variant, altAllele);
-                        
-                        // Say it's homozygous alt
-                        variant.format.push_back("GT");
-                        auto& genotype = variant.samples[sampleName]["GT"];
-                        genotype.push_back(std::to_string(altNumber) + "/" + std::to_string(altNumber));
-                        
-                        // Set the variant position. Convert to 1-based.
-                        variant.position = referencePosition + 1 + variantOffset;
-                        
-#ifdef debug
-                        std::cerr << "Found NR variant " << refAllele << " -> "
-                            << altAllele << " on node " << node->id()
-                            << " at 1-based reference position " << variant.position
-                            << std::endl;
-#endif
-                            
-                        if(can_write_alleles(variant)) {
-                            // Output the created VCF variant.
-                            std::cout << variant << std::endl;
-                        } else {
-                            std::cerr << "Variant is too large" << std::endl;
-                            basesLost += refAllele.size();
-                        }
-                        
-                    } else {
-                        // One or a few bases of the node are missing. Call them
-                        // as deletions.
-                        
-                        if(runningDelStart == -1) {
-                            // Start a new deletion here. Note that here may be
-                            // base 0.
-                            runningDelStart = referencePosition;
-                        }
-                        // Otherwise we get used by the running del
-                        runningDelContinues = true;
-                    }
-                            
-                }
-            } else {
-                // This base is present.
-                // Is that described in an alt? Or do we want to account for it now?
-                if(copynumberUsedByAlts[node->id()] == 0 && announceNonVariant) {
-                    // Nope. Nobody has ever heard of this reference base. We
-                    // need to talk about it.
-                    
-                    std::string refAllele = refSeq.substr(referencePosition, 1);
-                    std::string altAllele = "<NON_REF>";
-                    
-                    // Make a Variant
-                    vcflib::Variant variant;
-                    variant.sequenceName = contigName;
-                    variant.setVariantCallFile(vcf);
-                    variant.quality = 0;
-                    
-                    // Cram the node and offset into the variant ID column, for these point variants
-                    variant.id = std::to_string(node->id()) + "." + std::to_string(positionOnNode);
-                    
-                    // Initialize the ref allele
-                    create_ref_allele(variant, refAllele);
-                    
-                    // Add the novel deletion allele
-                    int altNumber = add_alt_allele(variant, altAllele);
-                    
-                    // Say it's homozygous ref
-                    variant.format.push_back("GT");
-                    auto& genotype = variant.samples[sampleName]["GT"];
-                    genotype.push_back("0/0");
-                    
-                    // Set the variant position. Convert to 1-based.
-                    variant.position = referencePosition + 1 + variantOffset;
-                    
-                    if(can_write_alleles(variant)) {
-                        // Output the created VCF variant.
-                        std::cout << variant << std::endl;
-                    } else {
-                        std::cerr << "Variant is too large" << std::endl;
-                        basesLost += refAllele.size();
-                    }
-                }
-            }
-            
-            if(runningDelStart != -1 && !runningDelContinues) {
-                // We're right after the end of a running deletion.
-                
-                // How many bases were deleted?
-                size_t runningDelLength = referencePosition - runningDelStart;
-                
-#ifdef debug
-                std::cerr << "Running del length " << runningDelLength << " internal to node." << std::endl;
-#endif
-                
-                std::string refAllele;
-                std::string altAllele;
-                
-               
-                
-                if(runningDelStart == 0) {
-                    // Special handling of deletion of the first base
-                    
-                    // Grab its n reference bases
-                    refAllele = refSeq.substr(runningDelStart, runningDelLength + 1);
-                    
-                    // Grab its one alt base
-                    altAllele = refSeq.substr(referencePosition, 1);
-                    
-                } else {
-                
-                    // We want the ref allele to start a base early and include
-                    // the base before the deleted bases.
-                    runningDelStart -= 1;
-                    
-                    // Grab its two reference bases
-                    refAllele = refSeq.substr(runningDelStart, runningDelLength + 1);
-                    
-                    // Grab its one alt base
-                    altAllele = refSeq.substr(runningDelStart, 1);
-                }
-                
-                
-                // Make a Variant
-                vcflib::Variant variant;
-                variant.sequenceName = contigName;
-                variant.setVariantCallFile(vcf);
-                variant.quality = 0;
-                
-                // Initialize the ref allele
-                create_ref_allele(variant, refAllele);
-                
-                // Add the novel deletion allele
-                int altNumber = add_alt_allele(variant, altAllele);
-                
-                // Say it's homozygous deleted for the whole run.
-                variant.format.push_back("GT");
-                auto& genotype = variant.samples[sampleName]["GT"];
-                genotype.push_back(std::to_string(altNumber) + "/" + std::to_string(altNumber));
-                
-                // Set the variant position. Convert to 1-based.
-                variant.position = runningDelStart + 1 + variantOffset;
-                
-#ifdef debug
-                std::cerr << "Found variant " << refAllele << " -> "
-                    << altAllele << " on node " << node->id()
-                    << " at 1-based reference position " << variant.position
-                    << std::endl;
-#endif
-                    
-                if(can_write_alleles(variant)) {
-                    // Output the created VCF variant.
-                    std::cout << variant << std::endl;
-                } else {
-                    std::cerr << "Variant is too large" << std::endl;
-                    basesLost += refAllele.size();
-                }
-                    
-                // Clear the running deletion
-                runningDelStart = -1;
-                
-            }
-        }
-        
-        // We're now at the 1-past-the-end position on the node.
-        if(runningDelStart != -1) {
-            // We were deleting up to the end of the node.
-            
-            // We know we didn't delete the whole node, no need to check for pos
-            // 0 in ref.
-            
-            // How many bases were deleted? It's the end ref position of the
-            // node minus the ref position where the del started.
-            size_t runningDelLength = (referencePositionAndOrientation.at(node->id()).first +
-                node->sequence().size() - runningDelStart);
-                
-#ifdef debug
-            std::cerr << "Running del length " << runningDelLength << " at end of node." << std::endl;
-#endif
-            
-            // We want the ref allele to start a base early and include
-            // the base before the deleted bases.
-            runningDelStart -= 1;
-            
-            // Grab its two reference bases
-            std::string refAllele = refSeq.substr(runningDelStart, runningDelLength + 1);
-            
-            // Grab its one alt base
-            std::string altAllele = refSeq.substr(runningDelStart, 1);
-            
-            // Make a Variant
-            vcflib::Variant variant;
-            variant.sequenceName = contigName;
-            variant.setVariantCallFile(vcf);
-            variant.quality = 0;
-            
-            // Initialize the ref allele
-            create_ref_allele(variant, refAllele);
-            
-            // Add the novel deletion allele
-            int altNumber = add_alt_allele(variant, altAllele);
-            
-            // Say it's homozygous deleted for the whole run.
-            variant.format.push_back("GT");
-            auto& genotype = variant.samples[sampleName]["GT"];
-            genotype.push_back(std::to_string(altNumber) + "/" + std::to_string(altNumber));
-            
-            // Set the variant position. Convert to 1-based.
-            variant.position = runningDelStart + 1 + variantOffset;
-            
-#ifdef debug
-            std::cerr << "Found variant " << refAllele << " -> "
-                << altAllele << " on node " << node->id()
-                << " at 1-based reference position " << variant.position
-                << std::endl;
-#endif
-                
-            if(can_write_alleles(variant)) {
-                // Output the created VCF variant.
-                std::cout << variant << std::endl;
-            } else {
-                std::cerr << "Variant is too large" << std::endl;
-                basesLost += refAllele.size();
-            }
-                
-            // Clear the running deletion
-            runningDelStart = -1;
-        }
         
     });
     
