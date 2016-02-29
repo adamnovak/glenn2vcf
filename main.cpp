@@ -197,7 +197,7 @@ std::vector<std::list<std::list<vg::NodeTraversal>>> bfs_left(vg::VG& graph,
     }
     assert(nodeCopyNumbers.at(node.node) <= 2);
     // Find the set for this copy number and put in the node
-    alreadyQueued[nodeCopyNumbers.at(node.node) - 1].insert(node);
+    alreadyQueued.at(nodeCopyNumbers.at(node.node) - 1).insert(node);
     
     while(!toExtend.empty()) {
         // Keep going until we've visited every node up to our max search depth.
@@ -219,7 +219,7 @@ std::vector<std::list<std::list<vg::NodeTraversal>>> bfs_left(vg::VG& graph,
             // lands in a place that is itself deleted.
             
             // Say we got to the right place
-            toReturn[flow - 1].push_back(path);
+            toReturn.at(flow - 1).push_back(path);
             
             // Don't bother looking for extensions, we already got there. If
             // this path gets disqualified, extensions will also get
@@ -254,8 +254,9 @@ std::vector<std::list<std::list<vg::NodeTraversal>>> bfs_left(vg::VG& graph,
             
                 // Can we already get here with this copy number or more?
                 bool canAlreadyReachWithThisCopyNumberOrGreater = false;
-                for(size_t i = alreadyQueued.size(); i >= newMaxPushable; i++) {
-                    if(alreadyQueued[i - 1].count(prevNode)) {
+                for(size_t i = alreadyQueued.size(); i >= newMaxPushable; i--) {
+                    // Run the loop from high copy numbers to low copy numbers
+                    if(alreadyQueued.at(i - 1).count(prevNode)) {
                         canAlreadyReachWithThisCopyNumberOrGreater = true;
                     }
                 }
@@ -274,7 +275,7 @@ std::vector<std::list<std::list<vg::NodeTraversal>>> bfs_left(vg::VG& graph,
                 
                 // Remember we found a way to this node, so we don't try and
                 // visit it other ways.
-                alreadyQueued[newMaxPushable - 1].insert(prevNode);
+                alreadyQueued.at(newMaxPushable - 1).insert(prevNode);
             }
         }
         
