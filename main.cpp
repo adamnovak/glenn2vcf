@@ -334,7 +334,7 @@ std::vector<std::list<std::list<vg::NodeTraversal>>> bfs_right(vg::VG& graph,
  * before the last node in the reference. Needs a set of nodes identified as
  * entirely present, so it can search paths using only those nodes.
  */
-std::pair<std::list<vg::NodeTraversal>, size_t>
+std::pair<std::vector<vg::NodeTraversal>, size_t>
 find_bubble(vg::VG& graph, vg::Node* node, const ReferenceIndex& index,
 const std::map<vg::Node*, size_t>& nodeCopyNumbers) {
 
@@ -411,7 +411,7 @@ const std::map<vg::Node*, size_t>& nodeCopyNumbers) {
                     // the reference before they leave.
                     
                     // Start with the left path
-                    std::list<vg::NodeTraversal> fullPath{leftPath.begin(), leftPath.end()};
+                    std::vector<vg::NodeTraversal> fullPath{leftPath.begin(), leftPath.end()};
                     
                     // We need to detect overlap with the left path
                     bool overlap = false;
@@ -471,7 +471,7 @@ const std::map<vg::Node*, size_t>& nodeCopyNumbers) {
         }
         
         // Return no copy number through no path if we can't find anything.
-        return std::make_pair(std::list<vg::NodeTraversal>(), (size_t) 0);
+        return std::make_pair(std::vector<vg::NodeTraversal>(), (size_t) 0);
         
     };
     
@@ -498,7 +498,7 @@ const std::map<vg::Node*, size_t>& nodeCopyNumbers) {
     }
     
     // No combinations found in any tranche.
-    return std::make_pair(std::list<vg::NodeTraversal>(), 0);
+    return std::make_pair(std::vector<vg::NodeTraversal>(), 0);
 }
 #undef debug
 
@@ -903,14 +903,136 @@ int main(int argc, char** argv) {
             auto found = find_bubble(vg, node, index, nodeCopyNumbers);
             
             // Break out the actual path of NodeTraversals and the max copy number we can push.
-            std::list<vg::NodeTraversal> path = found.first;
-            int canPush = found.second;
+            auto& path = found.first;
+            auto& canPush = found.second;
             
-            // If we can't find one, complain we discarded this node's worth of variation (* copy number?)
+            if(canPush == 0) {
+                // If we can't find one, complain we discarded this node's worth
+                // of variation (* copy number?)
+                std::cerr << "Can't account for " << nodeCopyNumbers.at(node) <<
+                    " copies of node " << node->id() << " length " <<
+                    node->sequence().size() << std::endl;
+                
+                basesLost += node->sequence().size();
+                
+                // Skip this node and move on to the next
+                break;
+            }
             
             // Turn it into a substitution/insertion
             
-            // Debit copy numbers on all the involved nodes
+            // The position we have stored for this start node is the first
+            // position along the reference at which it occurs. Our bubble
+            // goes forward in the reference, so we must come out of the
+            // opposite end of the node from the one we have stored.
+            auto referenceIntervalStart = index.byId.at(path.front().node->id()).first +
+                path.front().node->sequence().size();
+            
+            // The position we have stored for the end node is the first
+            // position it occurs in the reference, and we know we go into
+            // it in a reference-concordant direction, so we must have our
+            // past-the-end position right there.
+            auto referenceIntervalPastEnd = index.byId.at(path.back().node->id()).first;
+            
+            
+            // We'll fill in this stream with all the node sequences we visit on
+            // the path, except for the first and last.
+            std::stringstream altStream;
+            
+            
+            if(referenceIntervalPastEnd - referenceIntervalStart == 0) {
+                // If this is an insert, make sure we have the 1 base before it.
+                
+                // TODO: we should handle an insert at the very beginning
+                assert(referenceIntervalStart > 0);
+                
+                // Budge jeft and add that character to the alt as well
+                referenceIntervalStart--;
+                altStream << index.sequence[referenceIntervalStart];
+            }
+            
+            // We also need a list of all the alt node IDs for anming the
+            // variant.
+            std::stringstream idStream;
+            
+            for(int64_t i = 1; i < path.size() - 1; i++) {
+                // For all but the first and last nodes, grab their sequences in
+                // the correct orientation.
+                
+                std::string addedSequence = path[i].node->sequence();
+            
+                if(path[i].backward) {
+                    // If the node is traversed backward, we need to flip its sequence.
+                    addedSequence = vg::reverse_complement(addedSequence);
+                }
+                
+                // Stick the sequence
+                altStream << addedSequence;
+                
+                // Debit copy number.
+                nodeCopyNumbers[path[i].node] -= canPush;
+                
+                // Record ID
+                idStream << std::to_string(path[i].node->id());
+                if(i != path.size() - 2) {
+                    // Add a separator (-2 since the last thing is path is an
+                    // anchoring reference node)
+                    idStream << "_";
+                }
+            }
+
+            
+
+            // Make the variant and emit it.
+            std::string refAllele = index.sequence.substr(
+                referenceIntervalStart, referenceIntervalPastEnd - referenceIntervalStart);
+            std::string altAllele = altStream.str();
+            
+            // Make a Variant
+            vcflib::Variant variant;
+            variant.sequenceName = contigName;
+            variant.setVariantCallFile(vcf);
+            variant.quality = 0;
+            variant.position = referenceIntervalStart + 1 + variantOffset;
+            variant.id = idStream.str();
+            
+            // Initialize the ref allele
+            create_ref_allele(variant, refAllele);
+            
+            // Add the alt allele
+            int altNumber = add_alt_allele(variant, altAllele);
+            
+            // Say we're going to spit out the genotype for this sample.        
+            variant.format.push_back("GT");
+            auto& genotype = variant.samples[sampleName]["GT"];
+            
+            if(canPush == 1) {
+                // We're allele alt and ref heterozygous.
+                genotype.push_back(std::to_string(altNumber) + "/0");
+            } else if(canPush == 2) {
+                // We're alt homozygous, other overlapping variants notwithstanding.
+                genotype.push_back(std::to_string(altNumber) + "/" + std::to_string(altNumber));
+            } else {
+                // We're something weird
+                throw std::runtime_error("Invalid copy number for alt: " + std::to_string(canPush));
+            }
+            
+#ifdef debug
+            std::cerr << "Found variant " << refAllele << " -> " << altAllele
+                << " caused by nodes " <<  variant.id
+                << " at 1-based reference position " << variant.position
+                << std::endl;
+#endif
+
+            if(can_write_alleles(variant)) {
+                // Output the created VCF variant.
+                std::cout << variant << std::endl;
+            } else {
+                std::cerr << "Variant is too large" << std::endl;
+                // TODO: account for the 1 base we added extra if it was a pure
+                // insert.
+                basesLost += altAllele.size();
+            }
             
             
         }
