@@ -321,7 +321,6 @@ std::vector<std::list<std::list<vg::NodeTraversal>>> bfs_right(vg::VG& graph,
     return toReturn;
 }
 
-#define debug
 /**
  * Given a vg graph, a node in the graph, and an index for the reference path,
  * look out from the node in both directions to find a bubble relative to the
@@ -500,7 +499,6 @@ const std::map<vg::Node*, size_t>& nodeCopyNumbers) {
     // No combinations found in any tranche.
     return std::make_pair(std::vector<vg::NodeTraversal>(), 0);
 }
-#undef debug
 
 /**
  * Trace out the reference path in the given graph named by the given name.
@@ -618,7 +616,6 @@ void help_main(char** argv) {
         << "    -h, --help          print this help message" << std::endl;
 }
 
-#define debug
 int main(int argc, char** argv) {
     
     if(argc == 1) {
@@ -776,6 +773,11 @@ int main(int argc, char** argv) {
 #ifdef debug
                 std::cerr << "Uncalled node: " << nodeId << endl;
 #endif
+                // Put it down as copy number 0 so we don't try and path through
+                // it. TODO: just make the pathing code treat no-CN-stored nodes
+                // as unusable.
+                nodeCopyNumbers[vg.get_node(nodeId)] = 0;
+
                 // Handle the next line
                 continue;
             }
