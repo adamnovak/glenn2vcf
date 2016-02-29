@@ -1032,6 +1032,164 @@ int main(int argc, char** argv) {
         
     });
     
+    for(vg::Edge* deletion : deletionEdges) {
+        // Make deletion variants for each deletion edge
+        
+        // Where are we from and to in the reference (leftmost position and
+        // relative orientation)
+        auto& fromPlacement = index.byId.at(deletion->from());
+        auto& toPlacement = index.byId.at(deletion->to());
+        
+#ifdef debug
+        std::cerr << "Node " << deletion->from() << " is at ref position " << fromPlacement.first << std::endl;
+        std::cerr << "Node " << deletion->to() << " is at ref position " << toPlacement.first << std::endl;
+#endif
+        
+        // Are we attached to the reference-relative left or right of our from
+        // base?
+        bool fromFirst = fromPlacement.second != deletion->from_start();
+        
+        // And our to base?
+        bool toLast = toPlacement.second != deletion->to_end();
+        
+        // What base should the from end really be on? This is the non-deleted
+        // base outside the deletion on the from end.
+        int64_t fromBase = fromPlacement.first + (fromFirst ? 0 : vg.get_node(deletion->from())->sequence().size() - 1);
+        
+        // And the to end?
+        int64_t toBase = toPlacement.first + (toLast ? vg.get_node(deletion->to())->sequence().size() - 1 : 0);
+
+        // Make a string naming the edge
+        std::string edgeName = std::to_string(deletion->from()) +
+            (deletion->from_start() ? "L" : "R") + "->" +
+            std::to_string(deletion->to()) + (deletion->to_end() ? "R" : "L");
+
+        if(toBase <= fromBase) {
+            // Our edge ought to be running backward.
+            if(!(fromFirst && toLast)) {
+                // We're not a proper deletion edge in the backwards spelling
+                // Discard the edge
+                std::cerr << "Improper deletion edge " << edgeName << std::endl;
+                basesLost += toBase - fromBase;
+                continue;
+            } else {
+                // Just invert the from and to bases.
+                std::swap(fromBase, toBase);
+#ifdef debug
+                std::cerr << "Inverted deletion edge " << edgeName << std::endl;
+#endif
+            }
+        } else if(fromFirst || toLast) {
+            // We aren't a proper deletion edge in the forward spelling either.
+            std::cerr << "Improper deletion edge " << edgeName << std::endl;
+            basesLost += fromBase - toBase;
+            continue;
+        }
+        
+        
+        if(toBase <= fromBase + 1) {
+            // No bases were actually deleted
+            std::cerr << "No-op deletion edge " << edgeName << std::endl;
+            continue;
+        }
+        
+#ifdef debug
+        std::cerr << "Deletion " << edgeName << " bookended by " << fromBase << " and " << toBase << std::endl;
+#endif
+        
+        // Guess the copy number of the deletion
+        // Holds total base copies observed as not deleted.
+        double copyNumberTotal = 0;
+        int64_t deletedNodeStart = fromBase + 1;
+        while(deletedNodeStart != toBase) {
+#ifdef debug
+            std::cerr << "Next deleted node starts at " << deletedNodeStart << std::endl;
+#endif
+        
+            // Find the deleted node starting here in the reference
+            auto* deletedNode = index.byStart.at(deletedNodeStart).node;
+            // We know the next reference node should start just after this one.
+            // Even if it previously existed in the reference.
+            deletedNodeStart += deletedNode->sequence().size();
+            
+            // Count the bases we see not deleted
+            copyNumberTotal += deletedNode->sequence().size() * nodeCopyNumbers.at(deletedNode);
+        }
+        
+        // We divide the copy number by the total bases deleted to get the copy
+        // number remaining.
+        double copyNumberRemaining = copyNumberTotal / (toBase - fromBase - 1);
+        
+        // And then we can work out how much was deleted, on average
+        double copyNumberDeleted = 2.0 - copyNumberRemaining;
+        
+        // What copy number do we call for the deletion?
+        int64_t copyNumberCall = 2;
+        if(copyNumberDeleted < 1.5) {
+            // We should round down to just 1 copy deleted.
+            copyNumberCall = 1;
+        }
+        
+        // Now we know fromBase is the last non-deleted base and toBase is the
+        // first non-deleted base. We'll make an alt replacing the first non-
+        // deleted base plus the deletion with just the first non-deleted base.
+        // Rename everything to the same names we were using before.
+        size_t referenceIntervalStart = fromBase;
+        size_t referenceIntervalPastEnd = toBase;
+        
+        // Make the variant and emit it.
+        std::string refAllele = index.sequence.substr(
+            referenceIntervalStart, referenceIntervalPastEnd - referenceIntervalStart);
+        std::string altAllele = index.sequence.substr(referenceIntervalStart, 1);
+        
+        // Make a Variant
+        vcflib::Variant variant;
+        variant.sequenceName = contigName;
+        variant.setVariantCallFile(vcf);
+        variant.quality = 0;
+        variant.position = referenceIntervalStart + 1 + variantOffset;
+        variant.id = edgeName;
+        
+        // Initialize the ref allele
+        create_ref_allele(variant, refAllele);
+        
+        // Add the alt allele
+        int altNumber = add_alt_allele(variant, altAllele);
+        
+        // Say we're going to spit out the genotype for this sample.        
+        variant.format.push_back("GT");
+        auto& genotype = variant.samples[sampleName]["GT"];
+        
+        if(copyNumberCall == 1) {
+            // We're allele alt and ref heterozygous.
+            genotype.push_back(std::to_string(altNumber) + "/0");
+        } else if(copyNumberCall == 2) {
+            // We're alt homozygous, other overlapping variants notwithstanding.
+            genotype.push_back(std::to_string(altNumber) + "/" + std::to_string(altNumber));
+        } else {
+            // We're something weird
+            throw std::runtime_error("Invalid copy number for deletion: " + std::to_string(copyNumberCall));
+        }
+        
+#ifdef debug
+        std::cerr << "Found variant " << refAllele << " -> " << altAllele
+            << " caused by edge " <<  variant.id
+            << " at 1-based reference position " << variant.position
+            << std::endl;
+#endif
+
+        if(can_write_alleles(variant)) {
+            // Output the created VCF variant.
+            std::cout << variant << std::endl;
+        } else {
+            std::cerr << "Variant is too large" << std::endl;
+            // TODO: Drop the anchoring base that doesn't really belong to the
+            // deletion, when we can be consistent with inserts.
+            basesLost += altAllele.size();
+        }
+        
+    }
+    
     // Announce how much we can't show.
     std::cerr << "Had to drop " << basesLost << " bp of unrepresentable variation." << std::endl;
     
