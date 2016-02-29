@@ -613,7 +613,6 @@ void help_main(char** argv) {
         << "options:" << std::endl
         << "    -r, --ref PATH      use the given path name as the reference path" << std::endl
         << "    -c, --contig NAME   use the given name as the VCF contig name" << std::endl
-        << "    -g, --gvcf          include lines for non-variant positions" << std::endl
         << "    -s, --sample NAME   name the sample in the VCF with the given name" << std::endl
         << "    -o, --offset INT    offset variant positions by this amount" << std::endl
         << "    -h, --help          print this help message" << std::endl;
@@ -635,8 +634,6 @@ int main(int argc, char** argv) {
     std::string contigName = "";
     // What name should we use for the sample in the VCF file?
     std::string sampleName = "SAMPLE";
-    // Should we output lines for all the reference positions that do exist?
-    bool announceNonVariant = false;
     // How far should we offset positions of variants?
     int64_t variantOffset = 0;
     
@@ -646,7 +643,6 @@ int main(int argc, char** argv) {
         static struct option longOptions[] = {
             {"ref", required_argument, 0, 'r'},
             {"contig", required_argument, 0, 'c'},
-            {"gvcf", no_argument, 0, 'g'},
             {"sample", required_argument, 0, 's'},
             {"offset", required_argument, 0, 'o'},
             {"help", no_argument, 0, 'h'},
@@ -655,7 +651,7 @@ int main(int argc, char** argv) {
 
         int optionIndex = 0;
 
-        char option = getopt_long(argc, argv, "r:c:gs:o:h", longOptions, &optionIndex);
+        char option = getopt_long(argc, argv, "r:c:s:o:h", longOptions, &optionIndex);
         switch(option) {
         // Option value is in global optarg
         case 'r':
@@ -665,10 +661,6 @@ int main(int argc, char** argv) {
         case 'c':
             // Set the contig name
             contigName = optarg;
-            break;
-        case 'g':
-            // Say we need to announce non-variant ref positions
-            announceNonVariant = true;
             break;
         case 's':
             // Set the sample name
