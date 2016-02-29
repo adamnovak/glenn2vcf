@@ -8,13 +8,13 @@
         {"id": 6, "sequence": "GAGACAT"}
     ],
     "edge": [
-        {"from": 1, "to": 2},
+        {"from": 2, "to": 1, "from_start": true, "to_end": true},
         {"from": 1, "to": 3, "to_end": true},
         {"from": 3, "to": 4, "from_start": true},
         {"from": 2, "to": 4},
         {"from": 4, "to": 5},
         {"from": 5, "to": 6},
-        {"from": 4, "to": 6}
+        {"from": 6, "to": 4, "from_start": true, "to_end": true}
     ],
     "path": [
         {
