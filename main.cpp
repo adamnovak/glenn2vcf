@@ -171,8 +171,117 @@ std::vector<std::list<std::list<vg::NodeTraversal>>> bfs_left(vg::VG& graph,
     vg::NodeTraversal node, const ReferenceIndex& index,
     const std::map<vg::Node*, size_t>& nodeCopyNumbers, int64_t maxDepth = 10) {
 
-    // TODO: implement!
-    std::vector<std::list<std::list<vg::NodeTraversal>>> toReturn;
+    // We'll fill this in based on copy number we can push. Right now we fill it
+    // in with two empty lists, because we don't support copy numbers greater
+    // than 2. Slot 0 corresponds to copy number 1, slot 1 corresponds to copy
+    // number 2.
+    std::vector<std::list<std::list<vg::NodeTraversal>>> toReturn { {}, {} };
+    
+    // Do a BFS
+    
+    // This holds the paths to get to NodeTraversals to visit (all of which will
+    // end with the node we're starting with) and the max copy number that can
+    // be pushed through each.
+    std::list<std::pair<std::list<vg::NodeTraversal>, size_t>> toExtend;
+    
+    // This keeps a set of all the oriented nodes we already got to and don't
+    // need to queue again, stratified by copy number. Slot 0 corresponds to
+    // copy number 1, slot 1 corresponds to copy number 2.
+    std::vector<std::set<vg::NodeTraversal>> alreadyQueued { {}, {} };
+    
+    // Start at this node at depth 0, with the copy number it has
+    toExtend.emplace_back(std::make_pair(std::list<vg::NodeTraversal> {node}, nodeCopyNumbers.at(node.node)));
+    if(nodeCopyNumbers.at(node.node) == 0) {
+        // We can't find any paths for this node since it is absent.
+        return toReturn;
+    }
+    assert(nodeCopyNumbers.at(node.node) <= 2);
+    // Find the set for this copy number and put in the node
+    alreadyQueued[nodeCopyNumbers.at(node.node) - 1].insert(node);
+    
+    while(!toExtend.empty()) {
+        // Keep going until we've visited every node up to our max search depth.
+        
+        // Dequeue a path to extend and the copy number we're looking for from it.
+        std::pair<std::list<vg::NodeTraversal>, size_t> nextToExtend = toExtend.front();
+        toExtend.pop_front();
+        auto& path = nextToExtend.first;
+        auto& flow = nextToExtend.second;
+        
+        // We can't just throw out longer paths, because shorter paths may need
+        // to visit a node twice (in opposite orientations) and thus might get
+        // rejected later. Or they might overlap with paths on the other side.
+        
+        // Look up and see if the front node on the path is on our reference
+        // path
+        if(index.byId.count(path.front().node->id())) {
+            // This node is on the reference path. TODO: we don't care if it
+            // lands in a place that is itself deleted.
+            
+            // Say we got to the right place
+            toReturn[flow - 1].push_back(path);
+            
+            // Don't bother looking for extensions, we already got there. If
+            // this path gets disqualified, extensions will also get
+            // disqualified.
+        } else if(path.size() <= maxDepth) {
+            // We haven't hit the reference path yet, but we also haven't hit
+            // the max depth. Extend with all the possible extensions.
+            
+            // Look left
+            vector<vg::NodeTraversal> prevNodes;
+            graph.nodes_prev(path.front(), prevNodes);
+            
+            for(auto prevNode : prevNodes) {
+                // For each node we can get to
+                
+                // Is this an anchoring node?
+                bool isPrimaryPath = index.byId.count(prevNode.node->id());
+            
+                // What's its copy number effect? We just say we can push all
+                // the flow if we hit the reference.
+                auto nodeCopyNumber = isPrimaryPath ? flow : nodeCopyNumbers.at(prevNode.node);
+                
+                // How much flow can we push if we add it to the path
+                auto newMaxPushable = std::min(nodeCopyNumber, flow);
+                
+                if(newMaxPushable == 0) {
+                    // Skip this node; we can't use any copies of it.
+                    continue;
+                }
+                // We aren't built to handle copy numbers > 2.
+                assert(newMaxPushable <= 2);
+            
+                // Can we already get here with this copy number or more?
+                bool canAlreadyReachWithThisCopyNumberOrGreater = false;
+                for(size_t i = alreadyQueued.size(); i >= newMaxPushable; i++) {
+                    if(alreadyQueued[i - 1].count(prevNode)) {
+                        canAlreadyReachWithThisCopyNumberOrGreater = true;
+                    }
+                }
+                if(canAlreadyReachWithThisCopyNumberOrGreater) {
+                    // If we can, we don't need to add this node. TODO:
+                    // shouldn't we care about finding all the paths? Since some
+                    // path combinations can be invalid?
+                    continue;
+                }
+            
+            
+                // Make a new path extended left with the node
+                std::list<vg::NodeTraversal> extended(path);
+                extended.push_front(prevNode);
+                toExtend.push_back(std::make_pair(extended, newMaxPushable));
+                
+                // Remember we found a way to this node, so we don't try and
+                // visit it other ways.
+                alreadyQueued[newMaxPushable - 1].insert(prevNode);
+            }
+        }
+        
+    }
+    
+    // When we get here, we've found at least one of the paths to reference
+    // nodes at each possible length, with max pushable copy number.
     return toReturn;
 }
 
@@ -211,6 +320,7 @@ std::vector<std::list<std::list<vg::NodeTraversal>>> bfs_right(vg::VG& graph,
     return toReturn;
 }
 
+#define debug
 /**
  * Given a vg graph, a node in the graph, and an index for the reference path,
  * look out from the node in both directions to find a bubble relative to the
@@ -337,6 +447,7 @@ const std::map<vg::Node*, size_t>& nodeCopyNumbers) {
                     }
                     
                     // Count up max copy number pushable.
+                    // TODO: we check the main node twice.
                     size_t maxPushable = nodeCopyNumbers.at(node);
                     for(auto traversal : fullPath) {
                         // Limit to the narrowest node on the path, not counting the reference nodes.
@@ -388,6 +499,7 @@ const std::map<vg::Node*, size_t>& nodeCopyNumbers) {
     // No combinations found in any tranche.
     return std::make_pair(std::list<vg::NodeTraversal>(), 0);
 }
+#undef debug
 
 /**
  * Trace out the reference path in the given graph named by the given name.
