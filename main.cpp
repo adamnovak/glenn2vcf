@@ -1037,6 +1037,18 @@ int main(int argc, char** argv) {
     for(vg::Edge* deletion : deletionEdges) {
         // Make deletion variants for each deletion edge
         
+        // Make a string naming the edge
+        std::string edgeName = std::to_string(deletion->from()) +
+            (deletion->from_start() ? "L" : "R") + "->" +
+            std::to_string(deletion->to()) + (deletion->to_end() ? "R" : "L");
+        
+        if(!index.byId.count(deletion->from()) || !index.byId.count(deletion->to())) {
+            // This deletion edge does not cover a reference interval.
+            // TODO: take into account its presence when pushing copy number.
+            std::cerr << "Deletion edge " << edgeName << " does not cover a reference interval. Skipping!" << endl;
+            continue;
+        }
+        
         // Where are we from and to in the reference (leftmost position and
         // relative orientation)
         auto& fromPlacement = index.byId.at(deletion->from());
@@ -1060,11 +1072,6 @@ int main(int argc, char** argv) {
         
         // And the to end?
         int64_t toBase = toPlacement.first + (toLast ? vg.get_node(deletion->to())->sequence().size() - 1 : 0);
-
-        // Make a string naming the edge
-        std::string edgeName = std::to_string(deletion->from()) +
-            (deletion->from_start() ? "L" : "R") + "->" +
-            std::to_string(deletion->to()) + (deletion->to_end() ? "R" : "L");
 
         if(toBase <= fromBase) {
             // Our edge ought to be running backward.
