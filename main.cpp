@@ -163,13 +163,14 @@ bool mapping_is_perfect_match(const vg::Mapping& mapping) {
 
 /**
  * Do a breadth-first search left from the given node traversal, and return
- * maximal-copy-number, minimal-length-in-nodes node list paths starting at the
- * given node and ending on the indexed reference path. The paths are broken up
- * into lists in order of descending copy number.
+ * maximal-copy-number, node list paths starting at the given node and ending on
+ * the indexed reference path. The paths are broken up into lists in order of
+ * descending copy number, with paths sorted within each list in order of
+ * decreasign length.
  */
 std::vector<std::list<std::list<vg::NodeTraversal>>> bfs_left(vg::VG& graph,
     vg::NodeTraversal node, const ReferenceIndex& index,
-    const std::map<vg::Node*, size_t>& nodeCopyNumbers, int64_t maxDepth = 10) {
+    const std::map<vg::Node*, size_t>& nodeCopyNumbers, int64_t maxDepth = 100) {
 
     // We'll fill this in based on copy number we can push. Right now we fill it
     // in with two empty lists, because we don't support copy numbers greater
@@ -181,12 +182,14 @@ std::vector<std::list<std::list<vg::NodeTraversal>>> bfs_left(vg::VG& graph,
     
     // This holds the paths to get to NodeTraversals to visit (all of which will
     // end with the node we're starting with) and the max copy number that can
-    // be pushed through each.
+    // be pushed through each. Paths will be added in order of increasing
+    // length.
     std::list<std::pair<std::list<vg::NodeTraversal>, size_t>> toExtend;
     
     // This keeps a set of all the oriented nodes we already got to and don't
     // need to queue again, stratified by copy number. Slot 0 corresponds to
     // copy number 1, slot 1 corresponds to copy number 2.
+    // TODO: if we really want longest paths we can't do it like this.
     std::vector<std::set<vg::NodeTraversal>> alreadyQueued { {}, {} };
     
     // Start at this node at depth 0, with the copy number it has
@@ -252,22 +255,6 @@ std::vector<std::list<std::list<vg::NodeTraversal>>> bfs_left(vg::VG& graph,
                 // We aren't built to handle copy numbers > 2.
                 assert(newMaxPushable <= 2);
             
-                // Can we already get here with this copy number or more?
-                bool canAlreadyReachWithThisCopyNumberOrGreater = false;
-                for(size_t i = alreadyQueued.size(); i >= newMaxPushable; i--) {
-                    // Run the loop from high copy numbers to low copy numbers
-                    if(alreadyQueued.at(i - 1).count(prevNode)) {
-                        canAlreadyReachWithThisCopyNumberOrGreater = true;
-                    }
-                }
-                if(canAlreadyReachWithThisCopyNumberOrGreater) {
-                    // If we can, we don't need to add this node. TODO:
-                    // shouldn't we care about finding all the paths? Since some
-                    // path combinations can be invalid?
-                    continue;
-                }
-            
-            
                 // Make a new path extended left with the node
                 std::list<vg::NodeTraversal> extended(path);
                 extended.push_front(prevNode);
@@ -283,6 +270,14 @@ std::vector<std::list<std::list<vg::NodeTraversal>>> bfs_left(vg::VG& graph,
     
     // When we get here, we've found at least one of the paths to reference
     // nodes at each possible length, with max pushable copy number.
+    
+    // We want them sorted long to short.
+    
+    for(auto& paths : toReturn) {
+        // Paths were added short to long, so spit them out long to short.
+        paths.reverse();
+    }
+    
     return toReturn;
 }
 
@@ -295,13 +290,14 @@ vg::NodeTraversal flip(vg::NodeTraversal toFlip) {
 
 /**
  * Do a breadth-first search right from the given node traversal, and return
- * maximal-copy-number, minimal-length-in-nodes node list paths starting at the
- * given node and ending on the indexed reference path. The paths are broken up
- * into lists in order of descending copy number.
+ * maximal-copy-number, node list paths starting at the given node and ending on
+ * the indexed reference path. The paths are broken up into lists in order of
+ * descending copy number, with paths sorted within each list in order of
+ * decreasign length.
  */
 std::vector<std::list<std::list<vg::NodeTraversal>>> bfs_right(vg::VG& graph,
     vg::NodeTraversal node, const ReferenceIndex& index,
-    const std::map<vg::Node*, size_t>& nodeCopyNumbers, int64_t maxDepth = 10) {
+    const std::map<vg::Node*, size_t>& nodeCopyNumbers, int64_t maxDepth = 100) {
 
     // Look left from the backward version of the node.
     std::vector<std::list<std::list<vg::NodeTraversal>>> toReturn = bfs_left(graph, flip(node), index, nodeCopyNumbers, maxDepth);
