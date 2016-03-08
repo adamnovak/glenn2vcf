@@ -13,7 +13,7 @@
 #include "ekg/vg/index.hpp"
 #include "ekg/vg/vcflib/src/Variant.h"
 
-// Note: THIS CODE IS TERRIBLE
+
 // TODO:
 //  - Decide if we need to have sibling alts detect (somehow) and coordinate with each other
 //  - Parallelize variant generation
@@ -170,7 +170,8 @@ bool mapping_is_perfect_match(const vg::Mapping& mapping) {
  */
 std::vector<std::list<std::list<vg::NodeTraversal>>> bfs_left(vg::VG& graph,
     vg::NodeTraversal node, const ReferenceIndex& index,
-    const std::map<vg::Node*, size_t>& nodeCopyNumbers, int64_t maxDepth = 100) {
+    const std::map<vg::Node*, size_t>& nodeCopyNumbers, int64_t maxDepth = 10,
+    bool stopIfVisited = false) {
 
     // We'll fill this in based on copy number we can push. Right now we fill it
     // in with two empty lists, because we don't support copy numbers greater
@@ -202,12 +203,27 @@ std::vector<std::list<std::list<vg::NodeTraversal>>> bfs_left(vg::VG& graph,
     // Find the set for this copy number and put in the node
     alreadyQueued.at(nodeCopyNumbers.at(node.node) - 1).insert(node);
     
+    // How many ticks have we spent searching?
+    size_t searchTicks = 0;
+    // Track how many options we have because size may be O(n).
+    size_t stillToExtend = toExtend.size();
+    
     while(!toExtend.empty()) {
         // Keep going until we've visited every node up to our max search depth.
         
+#ifdef debug
+        searchTicks++;
+        if(searchTicks % 100 == 0) {
+            // Report on how much searching we are doing.
+            std::cerr << "Search tick " << searchTicks << ", " << stillToExtend << " options." << std::endl;
+        }
+#endif
+        
         // Dequeue a path to extend and the copy number we're looking for from it.
-        std::pair<std::list<vg::NodeTraversal>, size_t> nextToExtend = toExtend.front();
+        // Make sure to move out of the list to avoid a useless copy.
+        std::pair<std::list<vg::NodeTraversal>, size_t> nextToExtend(std::move(toExtend.front()));
         toExtend.pop_front();
+        stillToExtend--;
         auto& path = nextToExtend.first;
         auto& flow = nextToExtend.second;
         
@@ -222,7 +238,7 @@ std::vector<std::list<std::list<vg::NodeTraversal>>> bfs_left(vg::VG& graph,
             // lands in a place that is itself deleted.
             
             // Say we got to the right place
-            toReturn.at(flow - 1).push_back(path);
+            toReturn.at(flow - 1).emplace_back(std::move(path));
             
             // Don't bother looking for extensions, we already got there. If
             // this path gets disqualified, extensions will also get
@@ -254,11 +270,32 @@ std::vector<std::list<std::list<vg::NodeTraversal>>> bfs_left(vg::VG& graph,
                 }
                 // We aren't built to handle copy numbers > 2.
                 assert(newMaxPushable <= 2);
+                
+                if(stopIfVisited) {
+                    // Have we found a way to visit this node with this much copy
+                    // number or more already?
+                    bool alreadyVisited = false;
+                    for(auto i = alreadyQueued.size() - 1; i != newMaxPushable - 2; i--) {
+                        // For all the alreadyQueued sets at copy numbers at or
+                        // above what we can push to this node along this path, see
+                        // if we already have a way to reach this node.
+                        if(alreadyQueued.at(i).count(prevNode)) {
+                            alreadyVisited = true;
+                            break;
+                        }
+                    }
+                    if(alreadyVisited) {
+                        // We already have a way to get here that's this good or
+                        // better.
+                        break;
+                    }
+                }
             
                 // Make a new path extended left with the node
                 std::list<vg::NodeTraversal> extended(path);
                 extended.push_front(prevNode);
-                toExtend.push_back(std::make_pair(extended, newMaxPushable));
+                toExtend.emplace_back(std::move(extended), newMaxPushable);
+                stillToExtend++;
                 
                 // Remember we found a way to this node, so we don't try and
                 // visit it other ways.
@@ -297,7 +334,7 @@ vg::NodeTraversal flip(vg::NodeTraversal toFlip) {
  */
 std::vector<std::list<std::list<vg::NodeTraversal>>> bfs_right(vg::VG& graph,
     vg::NodeTraversal node, const ReferenceIndex& index,
-    const std::map<vg::Node*, size_t>& nodeCopyNumbers, int64_t maxDepth = 100) {
+    const std::map<vg::Node*, size_t>& nodeCopyNumbers, int64_t maxDepth = 10) {
 
     // Look left from the backward version of the node.
     std::vector<std::list<std::list<vg::NodeTraversal>>> toReturn = bfs_left(graph, flip(node), index, nodeCopyNumbers, maxDepth);
@@ -323,6 +360,8 @@ std::vector<std::list<std::list<vg::NodeTraversal>>> bfs_right(vg::VG& graph,
  * path, with a consistent orientation, such that the bubble has the maximum
  * copy number pushable along it, and such that it is the shortest bubble on
  * each side for that copy number. The bubble may not visit the same node twice.
+ *
+ * Takes a max depth for the searches producing the paths on each side.
  * 
  * Return the ordered and oriented nodes in the bubble, with the outer nodes
  * being oriented forward along the named path, and with the first node coming
@@ -331,7 +370,7 @@ std::vector<std::list<std::list<vg::NodeTraversal>>> bfs_right(vg::VG& graph,
  */
 std::pair<std::vector<vg::NodeTraversal>, size_t>
 find_bubble(vg::VG& graph, vg::Node* node, const ReferenceIndex& index,
-const std::map<vg::Node*, size_t>& nodeCopyNumbers) {
+const std::map<vg::Node*, size_t>& nodeCopyNumbers, int64_t maxDepth = 10) {
 
     // Find paths on both sides, with nodes on the primary path at the outsides
     // and this node in the middle. Returns paths stratified by copy number, so
@@ -339,8 +378,8 @@ const std::map<vg::Node*, size_t>& nodeCopyNumbers) {
     // first list with the other second list, then things in each first and
     // second list with the other third list, and so on (if we ever went that
     // far).
-    auto leftPaths = bfs_left(graph, vg::NodeTraversal(node), index, nodeCopyNumbers);
-    auto rightPaths = bfs_right(graph, vg::NodeTraversal(node), index, nodeCopyNumbers);
+    auto leftPaths = bfs_left(graph, vg::NodeTraversal(node), index, nodeCopyNumbers, maxDepth);
+    auto rightPaths = bfs_right(graph, vg::NodeTraversal(node), index, nodeCopyNumbers, maxDepth);
     
     // Find a combination of two paths which gets us to the reference in a
     // consistent orientation (meaning that when you look at the ending nodes'
@@ -609,6 +648,7 @@ void help_main(char** argv) {
         << "    -c, --contig NAME   use the given name as the VCF contig name" << std::endl
         << "    -s, --sample NAME   name the sample in the VCF with the given name" << std::endl
         << "    -o, --offset INT    offset variant positions by this amount" << std::endl
+        << "    -d, --depth INT     maximum depth for path search (default 10 nodes)" << std::endl
         << "    -h, --help          print this help message" << std::endl;
 }
 
@@ -629,6 +669,10 @@ int main(int argc, char** argv) {
     std::string sampleName = "SAMPLE";
     // How far should we offset positions of variants?
     int64_t variantOffset = 0;
+    // How many nodes should we be willing to look at on our path back to the
+    // primary path? Keep in mind we need to look at all valid paths (and all
+    // combinations thereof) until we find a valid pair.
+    int64_t maxDepth = 10;
     
     optind = 1; // Start at first real argument
     bool optionsRemaining = true;
@@ -638,13 +682,14 @@ int main(int argc, char** argv) {
             {"contig", required_argument, 0, 'c'},
             {"sample", required_argument, 0, 's'},
             {"offset", required_argument, 0, 'o'},
+            {"depth", required_argument, 0, 'd'},
             {"help", no_argument, 0, 'h'},
             {0, 0, 0, 0}
         };
 
         int optionIndex = 0;
 
-        char option = getopt_long(argc, argv, "r:c:s:o:h", longOptions, &optionIndex);
+        char option = getopt_long(argc, argv, "r:c:s:o:d:h", longOptions, &optionIndex);
         switch(option) {
         // Option value is in global optarg
         case 'r':
@@ -662,6 +707,10 @@ int main(int argc, char** argv) {
         case 'o':
             // Offset variants
             variantOffset = std::stoll(optarg);
+            break;
+        case 'd':
+            // Limit max depth for pathing to primary path
+            maxDepth = std::stoll(optarg);
             break;
         case -1:
             optionsRemaining = false;
@@ -890,7 +939,7 @@ int main(int argc, char** argv) {
             // We still have copy number on this node.
             
             // Find a path to the primary reference from here that can use maximal copy number
-            auto found = find_bubble(vg, node, index, nodeCopyNumbers);
+            auto found = find_bubble(vg, node, index, nodeCopyNumbers, maxDepth);
             
             // Break out the actual path of NodeTraversals and the max copy number we can push.
             auto& path = found.first;
