@@ -58,6 +58,7 @@ std::string char_to_string(const char& letter) {
 void write_vcf_header(std::ostream& stream, std::string& sample_name, std::string& contig_name, size_t contig_size) {
     stream << "##fileformat=VCFv4.2" << std::endl;
     stream << "##ALT=<ID=NON_REF,Description=\"Represents any possible alternative allele at this location\">" << std::endl;
+    stream << "##INFO=<ID=XREF,Number=0,Type=Flag,Description=\"Present in original graph\">" << std::endl;
     stream << "##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">" << std::endl;
     if(!contig_name.empty()) {
         // Announce the contig as well.
@@ -781,6 +782,10 @@ int main(int argc, char** argv) {
     // Edge object in the VG graph
     std::set<vg::Edge*> deletionEdges;
     
+    // We also need to track what edges and nodes are reference
+    std::set<vg::Node*> referenceNodes;
+    std::set<vg::Edge*> referenceEdges;
+    
     // Loop through all the lines
     std::string line;
     while(std::getline(glennStream, line)) {
@@ -838,8 +843,15 @@ int main(int argc, char** argv) {
             std::cerr << "Node " << nodeId << " has copy number " << copyNumber << endl;
 #endif
             
+            vg::Node* nodePointer = vg.get_node(nodeId);
+            
             // Save it
-            nodeCopyNumbers[vg.get_node(nodeId)] = copyNumber;
+            nodeCopyNumbers[nodePointer] = copyNumber;
+            
+            if(callType == "R") {
+                // Note that this is a reference node
+                referenceNodes.insert(nodePointer);
+            }
             
         } else if(lineType == "E") {
         
@@ -877,14 +889,22 @@ int main(int argc, char** argv) {
             std::string mode;
             tokens >> mode;
             
-            if(mode == "L") {
-                // This is a deletion edge
+            if(mode == "L" || mode == "R") {
+                // This is a deletion edge, or an edge in the primary path that
+                // may describe a nonzero-length deletion.
 #ifdef debug
-                std::cerr << "Edge " << edgeDescription << " is a deletion." << endl;
+                std::cerr << "Edge " << edgeDescription << " may describe a deletion." << endl;
 #endif
+
+                vg::Edge* edgePointer = vg.get_edge(std::make_pair(fromSide, toSide));
                 
                 // Say it's a deletion
-                deletionEdges.insert(vg.get_edge(std::make_pair(fromSide, toSide)));
+                deletionEdges.insert(edgePointer);
+                
+                if(mode == "R") {
+                    // The reference edges also get marked as such
+                    referenceEdges.insert(edgePointer);
+                }
 
             }
         
@@ -973,7 +993,6 @@ int main(int argc, char** argv) {
             // past-the-end position right there.
             auto referenceIntervalPastEnd = index.byId.at(path.back().node->id()).first;
             
-            
             // We'll fill in this stream with all the node sequences we visit on
             // the path, except for the first and last.
             std::stringstream altStream;
@@ -985,10 +1004,14 @@ int main(int argc, char** argv) {
                 // TODO: we should handle an insert at the very beginning
                 assert(referenceIntervalStart > 0);
                 
-                // Budge jeft and add that character to the alt as well
+                // Budge left and add that character to the alt as well
                 referenceIntervalStart--;
                 altStream << index.sequence[referenceIntervalStart];
             }
+            
+            // We'll se this to false if the alt involves any nodes that weren't
+            // in the original un-augmented graph (i.e. are not reference)
+            bool isAllReference = true;
             
             // We also need a list of all the alt node IDs for anming the
             // variant.
@@ -1018,6 +1041,11 @@ int main(int argc, char** argv) {
                     // anchoring reference node)
                     idStream << "_";
                 }
+                
+                if(!referenceNodes.count(path[i].node)) {
+                    // This is a novel, non-reference node.
+                    isAllReference = false;
+                }
             }
 
             
@@ -1034,6 +1062,9 @@ int main(int argc, char** argv) {
             variant.quality = 0;
             variant.position = referenceIntervalStart + 1 + variantOffset;
             variant.id = idStream.str();
+            
+            // Set whether it's ref or not
+            variant.infoFlags["XREF"] = isAllReference;
             
             // Initialize the ref allele
             create_ref_allele(variant, refAllele);
@@ -1060,6 +1091,7 @@ int main(int argc, char** argv) {
             std::cerr << "Found variant " << refAllele << " -> " << altAllele
                 << " caused by nodes " <<  variant.id
                 << " at 1-based reference position " << variant.position
+                << "(reference = " << isAllReference << ")"
                 << std::endl;
 #endif
 
