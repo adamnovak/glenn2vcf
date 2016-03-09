@@ -1217,9 +1217,21 @@ int main(int argc, char** argv) {
         
         // What copy number do we call for the deletion?
         int64_t copyNumberCall = 2;
-        if(copyNumberDeleted < 1.5) {
+        if(referenceEdges.count(deletion) && copyNumberDeleted < 0.5) {
+            // Doesn't look like enough reference is missing to justify calling
+            // this reference deletion as actually present. TODO: this means
+            // adding in a deletion to the reference can make you never call it.
+            // We really need edge copy number calls to do this right.
+            copyNumberCall = 0;
+        } else if(copyNumberDeleted < 1.5) {
             // We should round down to just 1 copy deleted.
             copyNumberCall = 1;
+        }
+        
+        if(copyNumberCall == 0) {
+            // This deletion has no copies deleted and should not be called in
+            // this sample at all.
+            continue;
         }
         
         // Now we know fromBase is the last non-deleted base and toBase is the
