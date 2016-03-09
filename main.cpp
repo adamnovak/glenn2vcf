@@ -13,7 +13,6 @@
 #include "ekg/vg/index.hpp"
 #include "ekg/vg/vcflib/src/Variant.h"
 
-
 // TODO:
 //  - Decide if we need to have sibling alts detect (somehow) and coordinate with each other
 //  - Parallelize variant generation
@@ -904,6 +903,9 @@ int main(int argc, char** argv) {
                 if(mode == "R") {
                     // The reference edges also get marked as such
                     referenceEdges.insert(edgePointer);
+#ifdef debug
+                    std::cerr << "Edge " << edgeDescription << " is reference." << endl;
+#endif
                 }
 
             }
@@ -1063,8 +1065,11 @@ int main(int argc, char** argv) {
             variant.position = referenceIntervalStart + 1 + variantOffset;
             variant.id = idStream.str();
             
-            // Set whether it's ref or not
-            variant.infoFlags["XREF"] = isAllReference;
+            if(isAllReference) {
+                // Flag the variant as all-reference. Don't put in a false entry
+                // if it isn't, because vcflib will spit out the flag anyway...
+                variant.infoFlags["XREF"] = true;
+            }
             
             // Initialize the ref allele
             create_ref_allele(variant, refAllele);
@@ -1122,7 +1127,9 @@ int main(int argc, char** argv) {
         if(!index.byId.count(deletion->from()) || !index.byId.count(deletion->to())) {
             // This deletion edge does not cover a reference interval.
             // TODO: take into account its presence when pushing copy number.
+#ifdef debug
             std::cerr << "Deletion edge " << edgeName << " does not cover a reference interval. Skipping!" << endl;
+#endif
             continue;
         }
         
@@ -1174,8 +1181,7 @@ int main(int argc, char** argv) {
         
         
         if(toBase <= fromBase + 1) {
-            // No bases were actually deleted
-            std::cerr << "No-op deletion edge " << edgeName << std::endl;
+            // No bases were actually deleted. Maybe this is just a normal reference edge.
             continue;
         }
         
@@ -1235,6 +1241,16 @@ int main(int argc, char** argv) {
         variant.quality = 0;
         variant.position = referenceIntervalStart + 1 + variantOffset;
         variant.id = edgeName;
+        
+        if(referenceEdges.count(deletion)) {
+            // Mark it as reference if it is a reference edge. Apparently vcflib
+            // does not check the flag value when serializing, so don't put in a
+            // flase entry if it's not a reference edge.œ
+            variant.infoFlags["XREF"] = true;
+#ifdef debug
+            std::cerr << edgeName << " is a reference deletion" << std::endl;
+#endif
+        }
         
         // Initialize the ref allele
         create_ref_allele(variant, refAllele);
