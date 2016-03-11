@@ -1015,9 +1015,11 @@ int main(int argc, char** argv) {
                 altStream << index.sequence[referenceIntervalStart];
             }
             
-            // We'll se this to false if the alt involves any nodes that weren't
-            // in the original un-augmented graph (i.e. are not reference)
-            bool isAllReference = true;
+            // Variants should be reference if most of their bases are
+            // reference, and novel otherwise. A single SNP base on a known
+            // insert should not make it a novel insert.
+            size_t referenceBases = 0;
+            size_t totalBases = 0;
             
             // We also need a list of all the alt node IDs for anming the
             // variant.
@@ -1048,10 +1050,13 @@ int main(int argc, char** argv) {
                     idStream << "_";
                 }
                 
-                if(!referenceNodes.count(path[i].node)) {
-                    // This is a novel, non-reference node.
-                    isAllReference = false;
+                if(referenceNodes.count(path[i].node)) {
+                    // This is a reference node.
+                    referenceBases += path[i].node->sequence().size();
                 }
+                // We always need to add in the length of the node to the total
+                // length
+                totalBases += path[i].node->sequence().size();
             }
 
             
@@ -1069,9 +1074,9 @@ int main(int argc, char** argv) {
             variant.position = referenceIntervalStart + 1 + variantOffset;
             variant.id = idStream.str();
             
-            if(isAllReference) {
-                // Flag the variant as all-reference. Don't put in a false entry
-                // if it isn't, because vcflib will spit out the flag anyway...
+            if(referenceBases >= totalBases / 2) {
+                // Flag the variant as reference. Don't put in a false entry if
+                // it isn't, because vcflib will spit out the flag anyway...
                 variant.infoFlags["XREF"] = true;
             }
             
