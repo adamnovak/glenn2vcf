@@ -535,6 +535,8 @@ const std::map<vg::Node*, size_t>& nodeCopyNumbers, int64_t maxDepth = 10) {
     return std::make_pair(std::vector<vg::NodeTraversal>(), 0);
 }
 
+#define debug
+
 /**
  * Trace out the reference path in the given graph named by the given name.
  * Returns a structure with useful indexes of the reference.
@@ -633,6 +635,8 @@ ReferenceIndex trace_reference_path(vg::VG& vg, std::string refPathName) {
     // Give back the indexes we have been making
     return index;
 }
+
+#undef debug
 
 void help_main(char** argv) {
     std::cerr << "usage: " << argv[0] << " [options] VGFILE GLENNFILE" << std::endl
@@ -1116,6 +1120,7 @@ int main(int argc, char** argv) {
         
     });
     
+#define debug
     for(vg::Edge* deletion : deletionEdges) {
         // Make deletion variants for each deletion edge
         
@@ -1139,8 +1144,10 @@ int main(int argc, char** argv) {
         auto& toPlacement = index.byId.at(deletion->to());
         
 #ifdef debug
-        std::cerr << "Node " << deletion->from() << " is at ref position " << fromPlacement.first << std::endl;
-        std::cerr << "Node " << deletion->to() << " is at ref position " << toPlacement.first << std::endl;
+        std::cerr << "Node " << deletion->from() << " is at ref position " 
+            << fromPlacement.first << " orientation " << fromPlacement.second << std::endl;
+        std::cerr << "Node " << deletion->to() << " is at ref position "
+            << toPlacement.first << " orientation " << toPlacement.second << std::endl;
 #endif
         
         // Are we attached to the reference-relative left or right of our from
@@ -1217,13 +1224,10 @@ int main(int argc, char** argv) {
         
         // What copy number do we call for the deletion?
         int64_t copyNumberCall = 2;
-        if(referenceEdges.count(deletion) && copyNumberDeleted < 0.5) {
-            // Doesn't look like enough reference is missing to justify calling
-            // this reference deletion as actually present. TODO: this means
-            // adding in a deletion to the reference can make you never call it.
-            // We really need edge copy number calls to do this right.
-            copyNumberCall = 0;
-        } else if(copyNumberDeleted < 1.5) {
+        // Having an edge at all means it's supported by the reads, so the
+        // presence of a deletion edge in the tsv means that we should call at
+        // least one copy deleted, regardless of node copy numbers.
+        if(copyNumberDeleted < 1.5) {
             // We should round down to just 1 copy deleted.
             copyNumberCall = 1;
         }
@@ -1308,6 +1312,7 @@ int main(int argc, char** argv) {
     std::cerr << "Had to drop " << basesLost << " bp of unrepresentable variation." << std::endl;
     
     return 0;
+#undef debug
 }
 
 
