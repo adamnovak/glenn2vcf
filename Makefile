@@ -36,10 +36,10 @@ $(LIBSDSL): $(LIBVG)
 $(LIBPROTOBUF): $(LIBVG)
 
 $(LIBVG):
-	cd ekg/vg && . source_me.sh && $(MAKE) lib/libvg.a
+	cd ekg/vg && . ./source_me.sh && $(MAKE) lib/libvg.a
 
 $(LIBXG): $(LIBVG)
-	cd ekg/vg && . source_me.sh && $(MAKE) lib/libxg.a
+	cd ekg/vg && . ./source_me.sh && $(MAKE) lib/libxg.a
 
 # Needs XG to be built for the protobuf headers
 main.o: $(LIBXG)
