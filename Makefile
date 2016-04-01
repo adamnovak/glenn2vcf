@@ -1,21 +1,24 @@
 .PHONY: all clean
 
 CXX=g++
-INCLUDES=-Iekg/vg -Iekg/vg/gssw/src -Iekg/vg/protobuf/build/include -Iekg/vg/gcsa2 -Iekg/vg/cpp -Iekg/vg/sdsl-lite/install/include -Iekg/vg/vcflib/src -Iekg/vg/vcflib -Iekg/vg/vcflib/tabixpp/htslib -Iekg/vg/progress_bar -Iekg/vg/sparsehash/build/include -Iekg/vg/lru_cache -Iekg/vg/fastahack -Iekg/vg/xg -Iekg/vg/xg/sdsl-lite/build/include -Iekg/vg/rocksdb/include
+INCLUDES=-Iekg/vg/src -Iekg/vg/include
 CXXFLAGS=-O3 -std=c++11 -fopenmp -g $(INCLUDES)
-LDSEARCH=-Lekg/vg -Lekg/vg/xg -Lekg/vg/xg/sdsl-lite/build/lib -Lekg/vg/xg/sdsl-lite/build/external/libdivsufsort/lib
+VGLIBDIR=ekg/vg/lib
+LDSEARCH=-Lekg/vg/src -L$(VGLIBDIR)
 LDFLAGS=-lm -lpthread -lz -lbz2 -lsnappy -ldivsufsort -ldivsufsort64 -ljansson $(LDSEARCH)
-LIBVG=ekg/vg/libvg.a
-LIBXG=ekg/vg/xg/libxg.a
-LIBPROTOBUF=ekg/vg/protobuf/libprotobuf.a
-LIBSDSL=ekg/vg/sdsl-lite/install/lib/libsdsl.a
-LIBGSSW=ekg/vg/gssw/src/libgssw.a
-LIBSNAPPY=ekg/vg/snappy/libsnappy.a
-LIBROCKSDB=ekg/vg/rocksdb/librocksdb.a
-LIBHTS=ekg/vg/htslib/libhts.a
-LIBGCSA2=ekg/vg/gcsa2/libgcsa2.a
-LIBVCFLIB=ekg/vg/vcflib/libvcflib.a
-VGLIBS=$(LIBVG) $(LIBXG) $(LIBVCFLIB) $(LIBGSSW) $(LIBSNAPPY) $(LIBROCKSDB) $(LIBHTS) $(LIBGCSA2) $(LIBSDSL) $(LIBPROTOBUF)
+LIBVG=$(VGLIBDIR)/libvg.a
+LIBXG=$(VGLIBDIR)/libxg.a
+LIBPROTOBUF=$(VGLIBDIR)/libprotobuf.a
+LIBSDSL=$(VGLIBDIR)/libsdsl.a
+LIBGSSW=$(VGLIBDIR)/libgssw.a
+LIBSNAPPY=$(VGLIBDIR)/libsnappy.a
+LIBROCKSDB=$(VGLIBDIR)/librocksdb.a
+LIBHTS=$(VGLIBDIR)/libhts.a
+LIBGCSA2=$(VGLIBDIR)/libgcsa2.a
+LIBVCFLIB=$(VGLIBDIR)/libvcflib.a
+LIBRAPTOR=$(VGLIBDIR)/libraptor2.a
+LIBGFAK=$(VGLIBDIR)/libgfakluge.a
+VGLIBS=$(LIBVG) $(LIBXG) $(LIBVCFLIB) $(LIBGSSW) $(LIBSNAPPY) $(LIBROCKSDB) $(LIBHTS) $(LIBGCSA2) $(LIBSDSL) $(LIBPROTOBUF) $(LIBRAPTOR) $(LIBGFAK)
 
 #Some little adjustments to build on OSX
 #(tested with gcc4.9 and jansson installed from MacPorts)
@@ -33,10 +36,10 @@ $(LIBSDSL): $(LIBVG)
 $(LIBPROTOBUF): $(LIBVG)
 
 $(LIBVG):
-	cd ekg/vg && $(MAKE) libvg.a
+	cd ekg/vg && . source_me.sh && $(MAKE) lib/libvg.a
 
 $(LIBXG): $(LIBVG)
-	cd ekg/vg && $(MAKE) xg/libxg.a
+	cd ekg/vg && . source_me.sh && $(MAKE) lib/libxg.a
 
 # Needs XG to be built for the protobuf headers
 main.o: $(LIBXG)
