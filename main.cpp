@@ -865,7 +865,8 @@ int main(int argc, char** argv) {
             // Split on commas. We'd just iterate the regex iterator ourselves,
             // but it seems to only split on the first comma if we do that.
             std::vector<string> parts;
-            std::copy(std::sregex_token_iterator(edgeDescription.begin(), edgeDescription.end(), std::regex(","), -1), std::sregex_token_iterator(), std::back_inserter(parts));
+            std::regex comma_re(",");
+            std::copy(std::sregex_token_iterator(edgeDescription.begin(), edgeDescription.end(), comma_re, -1), std::sregex_token_iterator(), std::back_inserter(parts));
             
             // We need the four fields to describe an edge.
             assert(parts.size() == 4);

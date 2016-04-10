@@ -1,9 +1,10 @@
 .PHONY: all clean
 
 CXX=g++
-INCLUDES=-Iekg/vg/include
+INCLUDES=-Iekg/vg/src -Iekg/vg/include
 CXXFLAGS=-O3 -std=c++11 -fopenmp -g $(INCLUDES)
-LDSEARCH=-Lekg/vg -Lekg/vg/xg -Lekg/vg/xg/sdsl-lite/build/lib -Lekg/vg/xg/sdsl-lite/build/external/libdivsufsort/lib
+VGLIBDIR=ekg/vg/lib
+LDSEARCH=-Lekg/vg/src -L$(VGLIBDIR)
 LDFLAGS=-lm -lpthread -lz -lbz2 -lsnappy -ldivsufsort -ldivsufsort64 -ljansson $(LDSEARCH)
 LIBVG=ekg/vg/lib/libvg.a
 LIBXG=ekg/vg/lib/libxg.a
@@ -38,9 +39,9 @@ $(LIBPROTOBUF): $(LIBVG)
 $(LIBXG): $(LIBVG)
 
 $(LIBVG):
-	cd ekg/vg && $(MAKE)
+	cd ekg/vg && . ./source_me.sh && $(MAKE)
 
-main.o: $(LIBXG)
+main.o: $(LIBVG)
 
 glenn2vcf: main.o $(LIBSONLIB) $(VGLIBS) 
 	$(CXX) $^ -o $@ $(CXXFLAGS) $(LDFLAGS)
