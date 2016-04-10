@@ -9,9 +9,9 @@
 #include <algorithm>
 #include <getopt.h>
 
-#include "ekg/vg/vg.hpp"
-#include "ekg/vg/index.hpp"
-#include "ekg/vg/vcflib/src/Variant.h"
+#include "ekg/vg/src/vg.hpp"
+#include "ekg/vg/src/index.hpp"
+#include "ekg/vg/deps/vcflib/src/Variant.h"
 
 // TODO:
 //  - Decide if we need to have sibling alts detect (somehow) and coordinate with each other
@@ -567,7 +567,7 @@ ReferenceIndex trace_reference_path(vg::VG& vg, std::string refPathName) {
             
             // Add in a mapping.
             index.byId[mapping.position().node_id()] = 
-                std::make_pair(referenceBase, mapping.is_reverse());
+                std::make_pair(referenceBase, mapping.position().is_reverse());
 #ifdef debug
             std::cerr << "Node " << mapping.position().node_id() << " rank " << mapping.rank()
                 << " starts at base " << referenceBase << " with "
@@ -599,7 +599,7 @@ ReferenceIndex trace_reference_path(vg::VG& vg, std::string refPathName) {
             sequence.erase(sequence.begin());
         }
         
-        if(mapping.is_reverse()) {
+        if(mapping.position().is_reverse()) {
             // Put the reverse sequence in the reference path
             refSeqStream << vg::reverse_complement(sequence);
         } else {
@@ -610,7 +610,7 @@ ReferenceIndex trace_reference_path(vg::VG& vg, std::string refPathName) {
         // Say that this node appears here along the reference in this
         // orientation.
         index.byStart[referenceBase] = vg::NodeTraversal(
-            vg.get_node(mapping.position().node_id()), mapping.is_reverse()); 
+            vg.get_node(mapping.position().node_id()), mapping.position().is_reverse()); 
             
         // Whether we found the right place for this node in the reference or
         // not, we still need to advance along the reference path. We assume the
