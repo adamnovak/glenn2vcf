@@ -535,7 +535,6 @@ const std::map<vg::Node*, size_t>& nodeCopyNumbers, int64_t maxDepth = 10) {
     return std::make_pair(std::vector<vg::NodeTraversal>(), 0);
 }
 
-#define debug
 
 /**
  * Trace out the reference path in the given graph named by the given name.
@@ -636,7 +635,6 @@ ReferenceIndex trace_reference_path(vg::VG& vg, std::string refPathName) {
     return index;
 }
 
-#undef debug
 
 void help_main(char** argv) {
     std::cerr << "usage: " << argv[0] << " [options] VGFILE GLENNFILE" << std::endl
@@ -1126,7 +1124,6 @@ int main(int argc, char** argv) {
         
     });
     
-#define debug
     for(vg::Edge* deletion : deletionEdges) {
         // Make deletion variants for each deletion edge
         
@@ -1318,7 +1315,6 @@ int main(int argc, char** argv) {
     std::cerr << "Had to drop " << basesLost << " bp of unrepresentable variation." << std::endl;
     
     return 0;
-#undef debug
 }
 
 
