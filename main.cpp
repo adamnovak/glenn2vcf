@@ -1058,8 +1058,60 @@ int main(int argc, char** argv) {
                 totalBases += path[i].node->sequence().size();
             }
 
-            
 
+            // Find the primary path nodes that are being skipped over/bypassed
+            
+            // First collect all the IDs of nodes we aren't skipping because
+            // they're in the alt. Don't count those.
+            std::set<int64_t> altIds;
+            for(auto& visit : path) {
+                altIds.insert(visit.node->id());
+            }
+
+            // Holds total primary path base copies observed as not deleted.
+            double refCopyNumberTotal = 0;
+            // And total bases of material we looked at on the primary path and
+            // not this alt
+            size_t refBases = 0;
+            int64_t refNodeStart = referenceIntervalStart;
+            while(refNodeStart != referenceIntervalPastEnd) {
+            
+                // Find the deleted node starting here in the reference
+                auto* refNode = index.byStart.at(refNodeStart).node;
+                
+                if(altIds.count(refNode->id())) {
+                    // This node is also involved in the alt we did take, so
+                    // skip it. TODO: work out how to deal with shared nodes.
+#ifdef debug
+                    std::cerr << "Node " << refNode->id() << " also used in alt" << std::endl;
+#endif
+                    continue;
+                }
+                
+                // We know the next reference node should start just after this one.
+                // Even if it previously existed in the reference.
+                refNodeStart += refNode->sequence().size();
+                
+                // Say we saw these bases, which may or may not have been called present
+                refBases += refNode->sequence().size();
+#ifdef debug
+                std::cerr << "Node " << refNode->id() << " has " << nodeCopyNumbers.at(refNode) << " copies" << std::endl;
+#endif
+                
+                // Count the bases we see not deleted
+                refCopyNumberTotal += refNode->sequence().size() * nodeCopyNumbers.at(refNode);
+            }
+            
+#ifdef debug
+            std::cerr << idStream.str() << " ref alternative: " << refCopyNumberTotal << "/" << refBases
+                << " from " << referenceIntervalStart << " to " << referenceIntervalPastEnd << std::endl;
+#endif
+            
+            // We divide the copy number of stuff passed over by the total bases
+            // of stuff passed over to get the copy number we should have of
+            // primary path alleles.
+            double copyNumberPrimaryReference = refBases == 0 ? 0 : refCopyNumberTotal / refBases;
+            
             // Make the variant and emit it.
             std::string refAllele = index.sequence.substr(
                 referenceIntervalStart, referenceIntervalPastEnd - referenceIntervalStart);
@@ -1093,8 +1145,15 @@ int main(int argc, char** argv) {
                 // We're allele alt and ref heterozygous.
                 genotype.push_back(std::to_string(altNumber) + "/0");
             } else if(canPush == 2) {
-                // We're alt homozygous, other overlapping variants notwithstanding.
-                genotype.push_back(std::to_string(altNumber) + "/" + std::to_string(altNumber));
+                if(copyNumberPrimaryReference < 0.5) {
+                    // We're alt homozygous, other overlapping variants notwithstanding.
+                    genotype.push_back(std::to_string(altNumber) + "/" + std::to_string(altNumber));
+                } else {
+                    // We have good evicence of both ref and alt here.
+                    // Say we're het but give a warning
+                    genotype.push_back(std::to_string(altNumber) + "/0");
+                    std::cerr << "Warning: copy numbers don't add up consistently for " << variant.id << "; assuming het" << endl;
+                }
             } else {
                 // We're something weird
                 throw std::runtime_error("Invalid copy number for alt: " + std::to_string(canPush));
@@ -1104,7 +1163,6 @@ int main(int argc, char** argv) {
             std::cerr << "Found variant " << refAllele << " -> " << altAllele
                 << " caused by nodes " <<  variant.id
                 << " at 1-based reference position " << variant.position
-                << "(reference = " << isAllReference << ")"
                 << std::endl;
 #endif
 
