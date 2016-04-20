@@ -789,8 +789,11 @@ int main(int argc, char** argv) {
     
     // Loop through all the lines
     std::string line;
+    size_t lineNumber = 0;
     while(std::getline(glennStream, line)) {
         // For each line
+        
+        lineNumber++;
         
         if(line == "") {
             // Skip blank lines
@@ -812,7 +815,7 @@ int main(int argc, char** argv) {
             tokens >> nodeId;
             
             if(!vg.has_node(nodeId)) {
-                throw std::runtime_error("Invalid node: " + std::to_string(nodeId));
+                throw std::runtime_error("Line " + std::to_string(lineNumber) + ": Invalid node: " + std::to_string(nodeId));
             }
             
             // What kind of call is it? We only care that it isn't "U"ncalled
@@ -822,7 +825,7 @@ int main(int argc, char** argv) {
             if(callType == "U") {
                 // This node has no called copy number
 #ifdef debug
-                std::cerr << "Uncalled node: " << nodeId << endl;
+                std::cerr << "Line " << std::to_string(lineNumber) << ": Uncalled node: " << nodeId << endl;
 #endif
                 // Put it down as copy number 0 so we don't try and path through
                 // it. TODO: just make the pathing code treat no-CN-stored nodes
@@ -841,7 +844,8 @@ int main(int argc, char** argv) {
             assert(copyNumber <= 2);
             
 #ifdef debug
-            std::cerr << "Node " << nodeId << " has copy number " << copyNumber << endl;
+            std::cerr << "Line " << std::to_string(lineNumber) << ": Node " << nodeId
+                << " has copy number " << copyNumber << endl;
 #endif
             
             vg::Node* nodePointer = vg.get_node(nodeId);
@@ -884,7 +888,7 @@ int main(int argc, char** argv) {
             
             if(!vg.has_edge(std::make_pair(fromSide, toSide))) {
                 // Ensure we really have that edge
-                throw std::runtime_error("Edge " + edgeDescription + " not in graph.");
+                throw std::runtime_error("Line " + std::to_string(lineNumber) + ": Edge " + edgeDescription + " not in graph.");
             }
             
             // Parse the mode
@@ -895,7 +899,8 @@ int main(int argc, char** argv) {
                 // This is a deletion edge, or an edge in the primary path that
                 // may describe a nonzero-length deletion.
 #ifdef debug
-                std::cerr << "Edge " << edgeDescription << " may describe a deletion." << endl;
+                std::cerr << "Line " << std::to_string(lineNumber) << ": Edge "
+                    << edgeDescription << " may describe a deletion." << endl;
 #endif
 
                 vg::Edge* edgePointer = vg.get_edge(std::make_pair(fromSide, toSide));
@@ -907,7 +912,8 @@ int main(int argc, char** argv) {
                     // The reference edges also get marked as such
                     referenceEdges.insert(edgePointer);
 #ifdef debug
-                    std::cerr << "Edge " << edgeDescription << " is reference." << endl;
+                    std::cerr << "Line " << std::to_string(lineNumber) << ": Edge "
+                        << edgeDescription << " is reference." << endl;
 #endif
                 }
 
@@ -915,7 +921,7 @@ int main(int argc, char** argv) {
         
         } else {
             // This is not a real kind of line
-            throw std::runtime_error("Unknown line type: " + lineType);
+            throw std::runtime_error("Line " + std::to_string(lineNumber) + ": Unknown line type: " + lineType);
         }
         
         
@@ -923,6 +929,7 @@ int main(int argc, char** argv) {
         
     }
     
+    cerr << "Loaded " << lineNumber << " lines from " << glennFile << endl;
     
     // Generate a vcf header. We can't make Variant records without a
     // VariantCallFile, because the variants need to know which of their
@@ -1074,7 +1081,8 @@ int main(int argc, char** argv) {
             // not this alt
             size_t refBases = 0;
             int64_t refNodeStart = referenceIntervalStart;
-            while(refNodeStart != referenceIntervalPastEnd) {
+            
+            while(refNodeStart < referenceIntervalPastEnd) {
             
                 // Find the reference node starting here or later. Remember that
                 // a variant anchored at its left base to a reference position
