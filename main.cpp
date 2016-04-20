@@ -1102,6 +1102,9 @@ int main(int argc, char** argv) {
                 // Pull out the reference node we located
                 auto* refNode = (*found).second.node;
             
+                // Next iteration look where this node ends.
+                refNodeStart = (*found).first + refNode->sequence().size();
+            
                 if(altIds.count(refNode->id())) {
                     // This node is also involved in the alt we did take, so
                     // skip it. TODO: work out how to deal with shared nodes.
@@ -1110,9 +1113,6 @@ int main(int argc, char** argv) {
 #endif
                     continue;
                 }
-                
-                // Next iteration look where this node ends.
-                refNodeStart = (*found).first + refNode->sequence().size();
                 
                 // Say we saw these bases, which may or may not have been called present
                 refBases += refNode->sequence().size();
