@@ -1076,9 +1076,24 @@ int main(int argc, char** argv) {
             int64_t refNodeStart = referenceIntervalStart;
             while(refNodeStart != referenceIntervalPastEnd) {
             
-                // Find the deleted node starting here in the reference
-                auto* refNode = index.byStart.at(refNodeStart).node;
+                // Find the reference node starting here or later. Remember that
+                // a variant anchored at its left base to a reference position
+                // may have no node starting right where it starts.
+                auto found = index.byStart.lower_bound(refNodeStart);
+                if(found == index.byStart.end()) {
+                    // No reference nodes here! That's a bit weird. But stop the
+                    // loop.
+                    break;
+                }
+                if((*found).first >= referenceIntervalPastEnd) {
+                    // The next reference node we can find is out of the space
+                    // being replaced. We're done.
+                    break;
+                }
                 
+                // Pull out the reference node we located
+                auto* refNode = (*found).second.node;
+            
                 if(altIds.count(refNode->id())) {
                     // This node is also involved in the alt we did take, so
                     // skip it. TODO: work out how to deal with shared nodes.
@@ -1088,9 +1103,8 @@ int main(int argc, char** argv) {
                     continue;
                 }
                 
-                // We know the next reference node should start just after this one.
-                // Even if it previously existed in the reference.
-                refNodeStart += refNode->sequence().size();
+                // Next iteration look where this node ends.
+                refNodeStart = (*found).first + refNode->sequence().size();
                 
                 // Say we saw these bases, which may or may not have been called present
                 refBases += refNode->sequence().size();
