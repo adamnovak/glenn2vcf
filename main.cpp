@@ -650,6 +650,7 @@ void help_main(char** argv) {
         << "    -c, --contig NAME   use the given name as the VCF contig name" << std::endl
         << "    -s, --sample NAME   name the sample in the VCF with the given name" << std::endl
         << "    -o, --offset INT    offset variant positions by this amount" << std::endl
+        << "    -l, --length INT    override total sequence length" << std::endl
         << "    -d, --depth INT     maximum depth for path search (default 10 nodes)" << std::endl
         << "    -h, --help          print this help message" << std::endl;
 }
@@ -675,6 +676,8 @@ int main(int argc, char** argv) {
     // primary path? Keep in mind we need to look at all valid paths (and all
     // combinations thereof) until we find a valid pair.
     int64_t maxDepth = 10;
+    // What should the total sequence length reported in the VCF header be?
+    int64_t length_override = -1;
     
     optind = 1; // Start at first real argument
     bool optionsRemaining = true;
@@ -685,13 +688,14 @@ int main(int argc, char** argv) {
             {"sample", required_argument, 0, 's'},
             {"offset", required_argument, 0, 'o'},
             {"depth", required_argument, 0, 'd'},
+            {"length", required_argument, 0, 'l'},
             {"help", no_argument, 0, 'h'},
             {0, 0, 0, 0}
         };
 
         int optionIndex = 0;
 
-        char option = getopt_long(argc, argv, "r:c:s:o:d:h", longOptions, &optionIndex);
+        char option = getopt_long(argc, argv, "r:c:s:o:d:l:h", longOptions, &optionIndex);
         switch(option) {
         // Option value is in global optarg
         case 'r':
@@ -713,6 +717,10 @@ int main(int argc, char** argv) {
         case 'd':
             // Limit max depth for pathing to primary path
             maxDepth = std::stoll(optarg);
+            break;
+        case 'l':
+            // Set a length override
+            length_override = std::stoll(optarg);
             break;
         case -1:
             optionsRemaining = false;
@@ -935,8 +943,10 @@ int main(int argc, char** argv) {
     // VariantCallFile, because the variants need to know which of their
     // available info fields or whatever are defined in the file's header, so
     // they know what to output.
+    // Handle length override if specified.
     std::stringstream headerStream;
-    write_vcf_header(headerStream, sampleName, contigName, index.sequence.size() + variantOffset);
+    write_vcf_header(headerStream, sampleName, contigName,
+        length_override != -1 ? length_override : (index.sequence.size() + variantOffset));
     
     // Load the headers into a new VCF file object
     vcflib::VariantCallFile vcf;
