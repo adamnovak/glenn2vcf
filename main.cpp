@@ -58,6 +58,7 @@ void write_vcf_header(std::ostream& stream, std::string& sample_name, std::strin
     stream << "##fileformat=VCFv4.2" << std::endl;
     stream << "##ALT=<ID=NON_REF,Description=\"Represents any possible alternative allele at this location\">" << std::endl;
     stream << "##INFO=<ID=XREF,Number=0,Type=Flag,Description=\"Present in original graph\">" << std::endl;
+    stream << "##INFO=<ID=XSEE,Number=.,Type=String,Description=\"Original graph node:offset cross-references\">" << std::endl;
     stream << "##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">" << std::endl;
     if(!contig_name.empty()) {
         // Announce the contig as well.
@@ -93,7 +94,7 @@ void create_ref_allele(vcflib::Variant& variant, const std::string& allele) {
  * Return true if a variant may be output, or false if this variant is valid but
  * the GATK might choke on it.
  *
- * Mostly used to throw out variants with very logn alleles, because GATK has an
+ * Mostly used to throw out variants with very long alleles, because GATK has an
  * allele length limit. How alleles that really *are* 1 megabase deletions are
  * to be specified to GATK is left as an exercise to the reader.
  */
@@ -791,6 +792,12 @@ int main(int argc, char** argv) {
     // Edge object in the VG graph
     std::set<vg::Edge*> deletionEdges;
     
+    // This holds where nodes came from (node and offset) in the original, un-
+    // augmented graph. For pieces of original nodes, this is where the piece
+    // started. For novel nodes, this is where the piece that thois is an
+    // alternative to started.
+    std::map<vg::Node*, std::pair<int64_t, size_t>> nodeSources;
+    
     // We also need to track what edges and nodes are reference
     std::set<vg::Node*> referenceNodes;
     std::set<vg::Edge*> referenceEdges;
@@ -864,6 +871,14 @@ int main(int argc, char** argv) {
             if(callType == "R") {
                 // Note that this is a reference node
                 referenceNodes.insert(nodePointer);
+            }
+            
+            // Load the original node ID and offset for this node, if present.
+            int64_t originalId;
+            size_t originalOffset;
+            
+            if(tokens >> originalId && tokens >> originalOffset && originalId != 0) {
+                nodeSources[nodePointer] = std::make_pair(originalId, originalOffset);
             }
             
         } else if(lineType == "E") {
@@ -1041,6 +1056,9 @@ int main(int argc, char** argv) {
             // variant.
             std::stringstream idStream;
             
+            // And a collection of all the involved node pointers;
+            std::set<vg::Node*> involvedNodes;
+            
             for(int64_t i = 1; i < path.size() - 1; i++) {
                 // For all but the first and last nodes, grab their sequences in
                 // the correct orientation.
@@ -1065,6 +1083,9 @@ int main(int argc, char** argv) {
                     // anchoring reference node)
                     idStream << "_";
                 }
+                
+                // Record involvement
+                involvedNodes.insert(path[i].node);
                 
                 if(referenceNodes.count(path[i].node)) {
                     // This is a reference node.
@@ -1124,6 +1145,9 @@ int main(int argc, char** argv) {
                     continue;
                 }
                 
+                // Record involvement
+                involvedNodes.insert(refNode);
+                
                 // Say we saw these bases, which may or may not have been called present
                 refBases += refNode->sequence().size();
 #ifdef debug
@@ -1161,6 +1185,26 @@ int main(int argc, char** argv) {
                 // Flag the variant as reference. Don't put in a false entry if
                 // it isn't, because vcflib will spit out the flag anyway...
                 variant.infoFlags["XREF"] = true;
+            }
+            
+            // We need to deduplicate the corss-references, because multiple
+            // involved nodes may cross-reference the same original node and
+            // offset.
+            std::set<string> crossreferences;
+            
+            for(auto* node : involvedNodes) {
+                // Every involved node gets its original node:offset recorded as
+                // an XSEE cross-reference.
+                
+                if(nodeSources.count(node)) {
+                    // It has a source. Find it
+                    auto& source = nodeSources.at(node);
+                    // Then add it to be referenced.
+                    crossreferences.insert(std::to_string(source.first) + ":" + std::to_string(source.second));
+                }
+            }
+            for(auto& crossreference : crossreferences) {
+                variant.info["XSEE"].push_back(crossreference);
             }
             
             // Initialize the ref allele
@@ -1359,6 +1403,44 @@ int main(int argc, char** argv) {
 #ifdef debug
             std::cerr << edgeName << " is a reference deletion" << std::endl;
 #endif
+        }
+        
+        // What original node:offset places do we care about?
+        std::set<std::string> crossreferences;
+        
+        vg::Node* startNode = vg.get_node(deletion->from());
+        if(nodeSources.count(startNode)) {
+            // We can point to the right place on the start node
+            auto& source = nodeSources.at(startNode);
+            
+            if(deletion->from_start()) {
+                // The right place is where it starts
+                crossreferences.insert(std::to_string(source.first) + ":" + std::to_string(source.second));
+            } else {
+                // The right place is where it ends
+                crossreferences.insert(std::to_string(source.first) + ":" +
+                    std::to_string(startNode->sequence().size() - 1 + source.second));
+            }
+        }
+        
+        vg::Node* endNode = vg.get_node(deletion->to());
+        if(nodeSources.count(endNode)) {
+            // We can point to the right place on the end node
+            auto& source = nodeSources.at(endNode);
+            
+            if(deletion->to_end()) {
+                // The right place is where it ends
+                crossreferences.insert(std::to_string(source.first) + ":" +
+                    std::to_string(endNode->sequence().size() - 1 + source.second));
+            } else {
+                // The right place is where it starts
+                crossreferences.insert(std::to_string(source.first) + ":" + std::to_string(source.second));
+            }
+        }
+        
+        for(auto& crossreference : crossreferences) {
+            // Add in all the deduplicated cross-references
+            variant.info["XSEE"].push_back(crossreference);
         }
         
         // Initialize the ref allele
