@@ -636,6 +636,39 @@ ReferenceIndex trace_reference_path(vg::VG& vg, std::string refPathName) {
     return index;
 }
 
+/**
+ * Given a collection of pileups by original node ID, and a set of original node
+ * id:offset cross-references, produce a VCF comment line giving the pileup for
+ * each of those positions on those nodes. Includes a trailing newline if
+ * nonempty.
+ *
+ * TODO: VCF comments aren't really a thing.
+ */
+std::string get_pileup_line(const std::map<int64_t, vg::NodePileup>& nodePileups, const std::set<std::pair<int64_t, size_t>> crossreferences) {
+    // We'll make a stringstream to write to.
+    std::stringstream out;
+    
+    out << "#";
+    
+    for(const auto& xref : crossreferences) {
+        // For every cross-reference
+        if(nodePileups.count(xref.first) && nodePileups.at(xref.first).base_pileup_size() > xref.second) {
+            // If we have that base pileup, grab it
+            auto basePileup = nodePileups.at(xref.first).base_pileup(xref.second);
+            
+            out << xref.first << ":" << xref.second << " " << basePileup.bases() << "\t";
+        }
+    }
+    
+    if(out.str().size() > 1) {
+        // We actually found something. Send it out with a trailing newline
+        out << std::endl;
+        return out.str();
+    } else {
+        // Give an empty string.
+        return "";
+    }
+}
 
 void help_main(char** argv) {
     std::cerr << "usage: " << argv[0] << " [options] VGFILE GLENNFILE" << std::endl
@@ -653,6 +686,7 @@ void help_main(char** argv) {
         << "    -o, --offset INT    offset variant positions by this amount" << std::endl
         << "    -l, --length INT    override total sequence length" << std::endl
         << "    -d, --depth INT     maximum depth for path search (default 10 nodes)" << std::endl
+        << "    -p, --pileup FILE   filename for a pileup to use to annotate variants" << std::endl
         << "    -h, --help          print this help message" << std::endl;
 }
 
@@ -678,7 +712,10 @@ int main(int argc, char** argv) {
     // combinations thereof) until we find a valid pair.
     int64_t maxDepth = 10;
     // What should the total sequence length reported in the VCF header be?
-    int64_t length_override = -1;
+    int64_t lengthOverride = -1;
+    // Should we load a pileup and print out pileup info as comments after
+    // variants?
+    std::string pileupFilename;
     
     optind = 1; // Start at first real argument
     bool optionsRemaining = true;
@@ -690,13 +727,14 @@ int main(int argc, char** argv) {
             {"offset", required_argument, 0, 'o'},
             {"depth", required_argument, 0, 'd'},
             {"length", required_argument, 0, 'l'},
+            {"pileup", required_argument, 0, 'p'},
             {"help", no_argument, 0, 'h'},
             {0, 0, 0, 0}
         };
 
         int optionIndex = 0;
 
-        char option = getopt_long(argc, argv, "r:c:s:o:d:l:h", longOptions, &optionIndex);
+        char option = getopt_long(argc, argv, "r:c:s:o:d:l:p:h", longOptions, &optionIndex);
         switch(option) {
         // Option value is in global optarg
         case 'r':
@@ -721,7 +759,11 @@ int main(int argc, char** argv) {
             break;
         case 'l':
             // Set a length override
-            length_override = std::stoll(optarg);
+            lengthOverride = std::stoll(optarg);
+            break;
+        case 'p':
+            // Set a pileup filename
+            pileupFilename = optarg;
             break;
         case -1:
             optionsRemaining = false;
@@ -954,6 +996,26 @@ int main(int argc, char** argv) {
     
     cerr << "Loaded " << lineNumber << " lines from " << glennFile << endl;
     
+    // If applicable, load the pileup.
+    // This will hold pileup records by node ID.
+    std::map<int64_t, vg::NodePileup> nodePileups;
+    
+    std::function<void(vg::Pileup&)> handlePileup = [&](vg::Pileup& p) { 
+        // Handle each pileup chunk
+        for(size_t i = 0; i < p.node_pileups_size(); i++) {
+            // Pull out every node pileup
+            auto& pileup = p.node_pileups(i);
+            // Save the pileup under its node's pointer.
+            nodePileups[pileup.node_id()] = pileup;
+        }
+    };
+    if(!pileupFilename.empty()) {
+        // We have to load some pileups
+        std::ifstream in;
+        in.open(pileupFilename.c_str());
+        stream::for_each(in, handlePileup);
+    }
+    
     // Generate a vcf header. We can't make Variant records without a
     // VariantCallFile, because the variants need to know which of their
     // available info fields or whatever are defined in the file's header, so
@@ -961,7 +1023,7 @@ int main(int argc, char** argv) {
     // Handle length override if specified.
     std::stringstream headerStream;
     write_vcf_header(headerStream, sampleName, contigName,
-        length_override != -1 ? length_override : (index.sequence.size() + variantOffset));
+        lengthOverride != -1 ? lengthOverride : (index.sequence.size() + variantOffset));
     
     // Load the headers into a new VCF file object
     vcflib::VariantCallFile vcf;
@@ -1190,7 +1252,7 @@ int main(int argc, char** argv) {
             // We need to deduplicate the corss-references, because multiple
             // involved nodes may cross-reference the same original node and
             // offset.
-            std::set<string> crossreferences;
+            std::set<std::pair<int64_t, size_t>> crossreferences;
             
             for(auto* node : involvedNodes) {
                 // Every involved node gets its original node:offset recorded as
@@ -1200,11 +1262,12 @@ int main(int argc, char** argv) {
                     // It has a source. Find it
                     auto& source = nodeSources.at(node);
                     // Then add it to be referenced.
-                    crossreferences.insert(std::to_string(source.first) + ":" + std::to_string(source.second));
+                    crossreferences.insert(source);
                 }
             }
             for(auto& crossreference : crossreferences) {
-                variant.info["XSEE"].push_back(crossreference);
+                variant.info["XSEE"].push_back(std::to_string(crossreference.first) + ":" +
+                    std::to_string(crossreference.second));
             }
             
             // Initialize the ref allele
@@ -1245,6 +1308,10 @@ int main(int argc, char** argv) {
             if(can_write_alleles(variant)) {
                 // Output the created VCF variant.
                 std::cout << variant << std::endl;
+                
+                // Output the pileup line, which will be nonempty if we have pileups
+                std::cout << get_pileup_line(nodePileups, crossreferences);
+            
             } else {
                 std::cerr << "Variant is too large" << std::endl;
                 // TODO: account for the 1 base we added extra if it was a pure
@@ -1406,7 +1473,7 @@ int main(int argc, char** argv) {
         }
         
         // What original node:offset places do we care about?
-        std::set<std::string> crossreferences;
+        std::set<std::pair<int64_t, size_t>> crossreferences;
         
         vg::Node* startNode = vg.get_node(deletion->from());
         if(nodeSources.count(startNode)) {
@@ -1415,11 +1482,10 @@ int main(int argc, char** argv) {
             
             if(deletion->from_start()) {
                 // The right place is where it starts
-                crossreferences.insert(std::to_string(source.first) + ":" + std::to_string(source.second));
+                crossreferences.insert(source);
             } else {
                 // The right place is where it ends
-                crossreferences.insert(std::to_string(source.first) + ":" +
-                    std::to_string(startNode->sequence().size() - 1 + source.second));
+                crossreferences.insert(std::make_pair(source.first, startNode->sequence().size() - 1 + source.second));
             }
         }
         
@@ -1430,17 +1496,17 @@ int main(int argc, char** argv) {
             
             if(deletion->to_end()) {
                 // The right place is where it ends
-                crossreferences.insert(std::to_string(source.first) + ":" +
-                    std::to_string(endNode->sequence().size() - 1 + source.second));
+                crossreferences.insert(std::make_pair(source.first, endNode->sequence().size() - 1 + source.second));
             } else {
                 // The right place is where it starts
-                crossreferences.insert(std::to_string(source.first) + ":" + std::to_string(source.second));
+                crossreferences.insert(source);
             }
         }
         
         for(auto& crossreference : crossreferences) {
             // Add in all the deduplicated cross-references
-            variant.info["XSEE"].push_back(crossreference);
+            variant.info["XSEE"].push_back(std::to_string(crossreference.first) + ":" +
+                std::to_string(crossreference.second));
         }
         
         // Initialize the ref allele
@@ -1474,6 +1540,10 @@ int main(int argc, char** argv) {
         if(can_write_alleles(variant)) {
             // Output the created VCF variant.
             std::cout << variant << std::endl;
+            
+            // Output the pileup line, which will be nonempty if we have pileups
+            std::cout << get_pileup_line(nodePileups, crossreferences);
+            
         } else {
             std::cerr << "Variant is too large" << std::endl;
             // TODO: Drop the anchoring base that doesn't really belong to the
