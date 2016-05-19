@@ -638,30 +638,44 @@ ReferenceIndex trace_reference_path(vg::VG& vg, std::string refPathName) {
 
 /**
  * Given a collection of pileups by original node ID, and a set of original node
- * id:offset cross-references, produce a VCF comment line giving the pileup for
- * each of those positions on those nodes. Includes a trailing newline if
- * nonempty.
+ * id:offset cross-references in both ref and alt categories, produce a VCF
+ * comment line giving the pileup for each of those positions on those nodes.
+ * Includes a trailing newline if nonempty.
  *
  * TODO: VCF comments aren't really a thing.
  */
 std::string get_pileup_line(const std::map<int64_t, vg::NodePileup>& nodePileups,
-    const std::set<std::pair<int64_t, size_t>> crossreferences) {
+    const std::set<std::pair<int64_t, size_t>>& refCrossreferences,
+    const std::set<std::pair<int64_t, size_t>>& altCrossreferences) {
     // We'll make a stringstream to write to.
     std::stringstream out;
     
     out << "#";
     
-    for(const auto& xref : crossreferences) {
+    for(const auto& xref : refCrossreferences) {
         // For every cross-reference
         if(nodePileups.count(xref.first) && nodePileups.at(xref.first).base_pileup_size() > xref.second) {
             // If we have that base pileup, grab it
             auto basePileup = nodePileups.at(xref.first).base_pileup(xref.second);
             
-            out << xref.first << ":" << xref.second << " " << basePileup.bases() << "\t";
+            out << xref.first << ":" << xref.second << " (ref) " << basePileup.bases() << "\t";
         }
         // Nodes with no pileups (either no pileups were provided or they didn't
         // appear/weren't visited by reads) will not be mentioned on this line
     }
+    
+    for(const auto& xref : altCrossreferences) {
+        // For every cross-reference
+        if(nodePileups.count(xref.first) && nodePileups.at(xref.first).base_pileup_size() > xref.second) {
+            // If we have that base pileup, grab it
+            auto basePileup = nodePileups.at(xref.first).base_pileup(xref.second);
+            
+            out << xref.first << ":" << xref.second << " (alt) " << basePileup.bases() << "\t";
+        }
+        // Nodes with no pileups (either no pileups were provided or they didn't
+        // appear/weren't visited by reads) will not be mentioned on this line
+    }
+    // TODO: make these nearly-identical loops a loop or a lambda or something.
     
     if(out.str().size() > 1) {
         // We actually found something. Send it out with a trailing newline
@@ -1127,8 +1141,10 @@ int main(int argc, char** argv) {
             // variant.
             std::stringstream idStream;
             
-            // And a collection of all the involved node pointers;
-            std::set<vg::Node*> involvedNodes;
+            // And collections of all the involved node pointers, on both the
+            // ref and alt sides
+            std::set<vg::Node*> refInvolvedNodes;
+            std::set<vg::Node*> altInvolvedNodes;
             
             for(int64_t i = 1; i < path.size() - 1; i++) {
                 // For all but the first and last nodes, grab their sequences in
@@ -1156,7 +1172,7 @@ int main(int argc, char** argv) {
                 }
                 
                 // Record involvement
-                involvedNodes.insert(path[i].node);
+                altInvolvedNodes.insert(path[i].node);
                 
                 if(knownNodes.count(path[i].node)) {
                     // This is a reference node.
@@ -1205,7 +1221,7 @@ int main(int argc, char** argv) {
                 auto* refNode = (*found).second.node;
                 
                 // Record involvement
-                involvedNodes.insert(refNode);
+                refInvolvedNodes.insert(refNode);
             
                 // Next iteration look where this node ends.
                 refNodeStart = (*found).first + refNode->sequence().size();
@@ -1260,10 +1276,13 @@ int main(int argc, char** argv) {
             
             // We need to deduplicate the corss-references, because multiple
             // involved nodes may cross-reference the same original node and
-            // offset.
+            // offset, and because the same original node and offset can be
+            // referenced by both ref and alt paths.
+            std::set<std::pair<int64_t, size_t>> refCrossreferences;
+            std::set<std::pair<int64_t, size_t>> altCrossreferences;
             std::set<std::pair<int64_t, size_t>> crossreferences;
             
-            for(auto* node : involvedNodes) {
+            for(auto* node : refInvolvedNodes) {
                 // Every involved node gets its original node:offset recorded as
                 // an XSEE cross-reference.
                 
@@ -1271,6 +1290,19 @@ int main(int argc, char** argv) {
                     // It has a source. Find it
                     auto& source = nodeSources.at(node);
                     // Then add it to be referenced.
+                    refCrossreferences.insert(source);
+                    crossreferences.insert(source);
+                }
+            }
+            for(auto* node : altInvolvedNodes) {
+                // Every involved node gets its original node:offset recorded as
+                // an XSEE cross-reference.
+                
+                if(nodeSources.count(node)) {
+                    // It has a source. Find it
+                    auto& source = nodeSources.at(node);
+                    // Then add it to be referenced.
+                    altCrossreferences.insert(source);
                     crossreferences.insert(source);
                 }
             }
@@ -1319,7 +1351,7 @@ int main(int argc, char** argv) {
                 std::cout << variant << std::endl;
                 
                 // Output the pileup line, which will be nonempty if we have pileups
-                std::cout << get_pileup_line(nodePileups, crossreferences);
+                std::cout << get_pileup_line(nodePileups, refCrossreferences, altCrossreferences);
             
             } else {
                 std::cerr << "Variant is too large" << std::endl;
@@ -1551,7 +1583,9 @@ int main(int argc, char** argv) {
             std::cout << variant << std::endl;
             
             // Output the pileup line, which will be nonempty if we have pileups
-            std::cout << get_pileup_line(nodePileups, crossreferences);
+            // We only have ref crossreferences here. TODO: make the ref and alt
+            // labels make sense for deletions/re-design the way labeling works.
+            std::cout << get_pileup_line(nodePileups, crossreferences, std::set<std::pair<int64_t, size_t>>());
             
         } else {
             std::cerr << "Variant is too large" << std::endl;
