@@ -644,7 +644,8 @@ ReferenceIndex trace_reference_path(vg::VG& vg, std::string refPathName) {
  *
  * TODO: VCF comments aren't really a thing.
  */
-std::string get_pileup_line(const std::map<int64_t, vg::NodePileup>& nodePileups, const std::set<std::pair<int64_t, size_t>> crossreferences) {
+std::string get_pileup_line(const std::map<int64_t, vg::NodePileup>& nodePileups,
+    const std::set<std::pair<int64_t, size_t>> crossreferences) {
     // We'll make a stringstream to write to.
     std::stringstream out;
     
@@ -658,6 +659,8 @@ std::string get_pileup_line(const std::map<int64_t, vg::NodePileup>& nodePileups
             
             out << xref.first << ":" << xref.second << " " << basePileup.bases() << "\t";
         }
+        // Nodes with no pileups (either no pileups were provided or they didn't
+        // appear/weren't visited by reads) will not be mentioned on this line
     }
     
     if(out.str().size() > 1) {
@@ -840,9 +843,10 @@ int main(int argc, char** argv) {
     // alternative to started.
     std::map<vg::Node*, std::pair<int64_t, size_t>> nodeSources;
     
-    // We also need to track what edges and nodes are reference
-    std::set<vg::Node*> referenceNodes;
-    std::set<vg::Edge*> referenceEdges;
+    // We also need to track what edges and nodes are reference (i.e. already
+    // known)
+    std::set<vg::Node*> knownNodes;
+    std::set<vg::Edge*> knownEdges;
     
     // Loop through all the lines
     std::string line;
@@ -875,7 +879,12 @@ int main(int argc, char** argv) {
                 throw std::runtime_error("Line " + std::to_string(lineNumber) + ": Invalid node: " + std::to_string(nodeId));
             }
             
-            // What kind of call is it? We only care that it isn't "U"ncalled
+            // Retrieve the node we're talking about 
+            vg::Node* nodePointer = vg.get_node(nodeId);
+            
+            // What kind of call is it? Could be "U"ncalled, or "R"eference
+            // (i.e. known in the original graph), which we have special
+            // handling for.
             std::string callType;
             tokens >> callType;
             
@@ -889,30 +898,30 @@ int main(int argc, char** argv) {
                 // as unusable.
                 nodeCopyNumbers[vg.get_node(nodeId)] = 0;
 
-                // Handle the next line
-                continue;
             }
             
             // Read the copy number
             size_t copyNumber;
             tokens >> copyNumber;
             
-            assert(0 <= copyNumber);
-            assert(copyNumber <= 2);
+            if(callType != "U") {
+                // For called nodes, actually process the copy number
             
-#ifdef debug
-            std::cerr << "Line " << std::to_string(lineNumber) << ": Node " << nodeId
-                << " has copy number " << copyNumber << endl;
-#endif
-            
-            vg::Node* nodePointer = vg.get_node(nodeId);
-            
-            // Save it
-            nodeCopyNumbers[nodePointer] = copyNumber;
-            
-            if(callType == "R") {
-                // Note that this is a reference node
-                referenceNodes.insert(nodePointer);
+                assert(0 <= copyNumber);
+                assert(copyNumber <= 2);
+                
+    #ifdef debug
+                std::cerr << "Line " << std::to_string(lineNumber) << ": Node " << nodeId
+                    << " has copy number " << copyNumber << endl;
+    #endif
+                
+                // Save it
+                nodeCopyNumbers[nodePointer] = copyNumber;
+                
+                if(callType == "R") {
+                    // Note that this is a reference node
+                    knownNodes.insert(nodePointer);
+                }
             }
             
             // Load the original node ID and offset for this node, if present.
@@ -975,7 +984,7 @@ int main(int argc, char** argv) {
                 
                 if(mode == "R") {
                     // The reference edges also get marked as such
-                    referenceEdges.insert(edgePointer);
+                    knownEdges.insert(edgePointer);
 #ifdef debug
                     std::cerr << "Line " << std::to_string(lineNumber) << ": Edge "
                         << edgeDescription << " is reference." << endl;
@@ -1111,7 +1120,7 @@ int main(int argc, char** argv) {
             // Variants should be reference if most of their bases are
             // reference, and novel otherwise. A single SNP base on a known
             // insert should not make it a novel insert.
-            size_t referenceBases = 0;
+            size_t knownBases = 0;
             size_t totalBases = 0;
             
             // We also need a list of all the alt node IDs for anming the
@@ -1149,9 +1158,9 @@ int main(int argc, char** argv) {
                 // Record involvement
                 involvedNodes.insert(path[i].node);
                 
-                if(referenceNodes.count(path[i].node)) {
+                if(knownNodes.count(path[i].node)) {
                     // This is a reference node.
-                    referenceBases += path[i].node->sequence().size();
+                    knownBases += path[i].node->sequence().size();
                 }
                 // We always need to add in the length of the node to the total
                 // length
@@ -1194,6 +1203,9 @@ int main(int argc, char** argv) {
                 
                 // Pull out the reference node we located
                 auto* refNode = (*found).second.node;
+                
+                // Record involvement
+                involvedNodes.insert(refNode);
             
                 // Next iteration look where this node ends.
                 refNodeStart = (*found).first + refNode->sequence().size();
@@ -1206,9 +1218,6 @@ int main(int argc, char** argv) {
 #endif
                     continue;
                 }
-                
-                // Record involvement
-                involvedNodes.insert(refNode);
                 
                 // Say we saw these bases, which may or may not have been called present
                 refBases += refNode->sequence().size();
@@ -1243,7 +1252,7 @@ int main(int argc, char** argv) {
             variant.position = referenceIntervalStart + 1 + variantOffset;
             variant.id = idStream.str();
             
-            if(referenceBases >= totalBases / 2) {
+            if(knownBases >= totalBases / 2) {
                 // Flag the variant as reference. Don't put in a false entry if
                 // it isn't, because vcflib will spit out the flag anyway...
                 variant.infoFlags["XREF"] = true;
@@ -1462,7 +1471,7 @@ int main(int argc, char** argv) {
         variant.position = referenceIntervalStart + 1 + variantOffset;
         variant.id = edgeName;
         
-        if(referenceEdges.count(deletion)) {
+        if(knownEdges.count(deletion)) {
             // Mark it as reference if it is a reference edge. Apparently vcflib
             // does not check the flag value when serializing, so don't put in a
             // flase entry if it's not a reference edge.œ
