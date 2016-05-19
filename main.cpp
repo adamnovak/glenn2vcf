@@ -59,7 +59,10 @@ void write_vcf_header(std::ostream& stream, std::string& sample_name, std::strin
     stream << "##ALT=<ID=NON_REF,Description=\"Represents any possible alternative allele at this location\">" << std::endl;
     stream << "##INFO=<ID=XREF,Number=0,Type=Flag,Description=\"Present in original graph\">" << std::endl;
     stream << "##INFO=<ID=XSEE,Number=.,Type=String,Description=\"Original graph node:offset cross-references\">" << std::endl;
+    stream << "##INFO=<ID=DP,Number=1,Type=Integer,Description=\"Total Depth\">" << std::endl;
+    stream << "##FORMAT=<ID=DP,Number=1,Type=Integer,Description=\"Read Depth\">" << std::endl;
     stream << "##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">" << std::endl;
+    stream << "##FORMAT=<ID=AD,Number=.,Type=Integer,Description=\"Allelic depths for the ref and alt alleles in the order listed\">" << std::endl;
     if(!contig_name.empty()) {
         // Announce the contig as well.
         stream << "##contig=<ID=" << contig_name << ",length=" << contig_size << ">" << std::endl;
@@ -938,7 +941,21 @@ int main(int argc, char** argv) {
         
     }
     
-    cerr << "Loaded " << lineNumber << " lines from " << glennFile << endl;
+    std::cerr << "Loaded " << lineNumber << " lines from " << glennFile << endl;
+    
+    // Crunch the numbers on the reference and its read support. How much read
+    // support in total (node length * aligned reads) does the primary path get?
+    size_t primaryPathTotalSupport = 0;
+    for(auto& pointerAndSupport : nodeReadSupport) {
+        if(index.byId.count(pointerAndSupport.first->id())) {
+            // This is a primary path node. Add in the total read bases supporting it
+            primaryPathTotalSupport += pointerAndSupport.first->sequence().size() * pointerAndSupport.second;
+        }
+    }
+    // Calculate average support in reads per base
+    double primaryPathAverageSupport = (double)primaryPathTotalSupport / index.sequence.size();
+    
+    std::cerr << "Primary path average coverage: " << primaryPathAverageSupport << endl;
     
     // If applicable, load the pileup.
     // This will hold pileup records by node ID.
@@ -1242,14 +1259,26 @@ int main(int argc, char** argv) {
             } else if(altReadSupportAverage > 2 * refReadSupportAverage) {
                 // Say it's hom alt
                 genotype.push_back(std::to_string(altNumber) + "/" + std::to_string(altNumber));
-            } else if(refReadSupportAverage + altReadSupportAverage > 4) {
+            } else if(refReadSupportAverage + altReadSupportAverage > primaryPathAverageSupport/2) {
                 // Say it's het
-                genotype.push_back(std::to_string(altNumber) + "/0");
+                genotype.push_back("0/" + std::to_string(altNumber));
             } else {
                 // Say we have no idea
                 genotype.push_back("./.");
             }
             // TODO: use legit thresholds here.
+            
+            // Add depth for the variant and the samples
+            std::string depthString = std::to_string((int64_t)round(refReadSupportAverage + altReadSupportAverage));
+            variant.format.push_back("DP");
+            variant.samples[sampleName]["DP"].push_back(depthString);
+            variant.info["DP"].push_back(depthString); // We only have one sample, so variant depth = sample depth
+            
+            // Also allelic depths
+            variant.format.push_back("AD");
+            variant.samples[sampleName]["AD"].push_back(std::to_string((int64_t)round(refReadSupportAverage)));
+            variant.samples[sampleName]["AD"].push_back(std::to_string((int64_t)round(altReadSupportAverage)));
+            
             
 #ifdef debug
             std::cerr << "Found variant " << refAllele << " -> " << altAllele
@@ -1476,7 +1505,7 @@ int main(int argc, char** argv) {
         
         if(copyNumberCall == 1) {
             // We're allele alt and ref heterozygous.
-            genotype.push_back(std::to_string(altNumber) + "/0");
+            genotype.push_back("0/" + std::to_string(altNumber));
         } else if(copyNumberCall == 2) {
             // We're alt homozygous, other overlapping variants notwithstanding.
             genotype.push_back(std::to_string(altNumber) + "/" + std::to_string(altNumber));
@@ -1484,6 +1513,18 @@ int main(int argc, char** argv) {
             // We're something weird
             throw std::runtime_error("Invalid copy number for deletion: " + std::to_string(copyNumberCall));
         }
+        
+        // Add depth for the variant and the samples
+        std::string depthString = std::to_string((int64_t)round(refReadSupportAverage));
+        variant.format.push_back("DP");
+        variant.samples[sampleName]["DP"].push_back(depthString);
+        variant.info["DP"].push_back(depthString); // We only have one sample, so variant depth = sample depth
+        
+        // Also allelic depths
+        variant.format.push_back("AD");
+        variant.samples[sampleName]["AD"].push_back(std::to_string((int64_t)round(refReadSupportAverage)));
+        // No depth for the deletion allele; we're only going by the ref depth for now
+        variant.samples[sampleName]["AD"].push_back(".");
         
 #ifdef debug
         std::cerr << "Found variant " << refAllele << " -> " << altAllele
