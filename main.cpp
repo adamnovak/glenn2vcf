@@ -91,23 +91,6 @@ void create_ref_allele(vcflib::Variant& variant, const std::string& allele) {
 }
 
 /**
- * Return true if a variant may be output, or false if this variant is valid but
- * the GATK might choke on it.
- *
- * Mostly used to throw out variants with very long alleles, because GATK has an
- * allele length limit. How alleles that really *are* 1 megabase deletions are
- * to be specified to GATK is left as an exercise to the reader.
- */
-bool can_write_alleles(vcflib::Variant& variant) {
-    for(auto& allele : variant.alleles) {
-        if(allele.size() > MAX_ALLELE_LENGTH) {
-            return false;
-        }
-    }
-    return true;
-}
-
-/**
  * Add a new alt allele to a vcflib Variant, since apaprently there's no method
  * for that already.
  *
@@ -147,6 +130,23 @@ int add_alt_allele(vcflib::Variant& variant, const std::string& allele) {
 }
 
 /**
+ * Return true if a variant may be output, or false if this variant is valid but
+ * the GATK might choke on it.
+ *
+ * Mostly used to throw out variants with very long alleles, because GATK has an
+ * allele length limit. How alleles that really *are* 1 megabase deletions are
+ * to be specified to GATK is left as an exercise to the reader.
+ */
+bool can_write_alleles(vcflib::Variant& variant) {
+    for(auto& allele : variant.alleles) {
+        if(allele.size() > MAX_ALLELE_LENGTH) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/**
  * Return true if a mapping is a perfect match, and false if it isn't.
  */
 bool mapping_is_perfect_match(const vg::Mapping& mapping) {
@@ -163,46 +163,43 @@ bool mapping_is_perfect_match(const vg::Mapping& mapping) {
 }
 
 /**
- * Do a breadth-first search left from the given node traversal, and return
- * maximal-copy-number, node list paths starting at the given node and ending on
- * the indexed reference path. The paths are broken up into lists in order of
- * descending copy number, with paths sorted within each list in order of
- * decreasign length.
+ * Get the length of a path through nodes, in base pairs.
  */
-std::vector<std::list<std::list<vg::NodeTraversal>>> bfs_left(vg::VG& graph,
-    vg::NodeTraversal node, const ReferenceIndex& index,
-    const std::map<vg::Node*, size_t>& nodeCopyNumbers, int64_t maxDepth = 10,
+size_t bp_length(const std::list<vg::NodeTraversal>& path) {
+    size_t length = 0;
+    for(auto& traversal : path) {
+        // Sum up length of each node's sequence
+        length += traversal.node->sequence().size();
+    }
+    return length;
+}
+
+/**
+ * Do a breadth-first search left from the given node traversal, and return
+ * lengths and paths starting at the given node and ending on the indexed
+ * reference path.
+ */
+std::set<std::pair<size_t, std::list<vg::NodeTraversal>>> bfs_left(vg::VG& graph,
+    vg::NodeTraversal node, const ReferenceIndex& index, int64_t maxDepth = 10,
     bool stopIfVisited = false) {
 
-    // We'll fill this in based on copy number we can push. Right now we fill it
-    // in with two empty lists, because we don't support copy numbers greater
-    // than 2. Slot 0 corresponds to copy number 1, slot 1 corresponds to copy
-    // number 2.
-    std::vector<std::list<std::list<vg::NodeTraversal>>> toReturn { {}, {} };
+    // Holds partial paths we want to return, with their lengths in bp.
+    std::set<std::pair<size_t, std::list<vg::NodeTraversal>>> toReturn;
     
     // Do a BFS
     
     // This holds the paths to get to NodeTraversals to visit (all of which will
-    // end with the node we're starting with) and the max copy number that can
-    // be pushed through each. Paths will be added in order of increasing
-    // length.
-    std::list<std::pair<std::list<vg::NodeTraversal>, size_t>> toExtend;
+    // end with the node we're starting with).
+    std::list<std::list<vg::NodeTraversal>> toExtend;
     
     // This keeps a set of all the oriented nodes we already got to and don't
-    // need to queue again, stratified by copy number. Slot 0 corresponds to
-    // copy number 1, slot 1 corresponds to copy number 2.
-    // TODO: if we really want longest paths we can't do it like this.
-    std::vector<std::set<vg::NodeTraversal>> alreadyQueued { {}, {} };
+    // need to queue again.
+    std::set<vg::NodeTraversal> alreadyQueued;
     
-    // Start at this node at depth 0, with the copy number it has
-    toExtend.emplace_back(std::make_pair(std::list<vg::NodeTraversal> {node}, nodeCopyNumbers.at(node.node)));
-    if(nodeCopyNumbers.at(node.node) == 0) {
-        // We can't find any paths for this node since it is absent.
-        return toReturn;
-    }
-    assert(nodeCopyNumbers.at(node.node) <= 2);
-    // Find the set for this copy number and put in the node
-    alreadyQueued.at(nodeCopyNumbers.at(node.node) - 1).insert(node);
+    // Start at this node at depth 0
+    toExtend.emplace_back(std::list<vg::NodeTraversal> {node});
+    // Mark this traversal as already queued
+    alreadyQueued.insert(node);
     
     // How many ticks have we spent searching?
     size_t searchTicks = 0;
@@ -220,13 +217,11 @@ std::vector<std::list<std::list<vg::NodeTraversal>>> bfs_left(vg::VG& graph,
         }
 #endif
         
-        // Dequeue a path to extend and the copy number we're looking for from it.
+        // Dequeue a path to extend.
         // Make sure to move out of the list to avoid a useless copy.
-        std::pair<std::list<vg::NodeTraversal>, size_t> nextToExtend(std::move(toExtend.front()));
+        std::list<vg::NodeTraversal> path(std::move(toExtend.front()));
         toExtend.pop_front();
         stillToExtend--;
-        auto& path = nextToExtend.first;
-        auto& flow = nextToExtend.second;
         
         // We can't just throw out longer paths, because shorter paths may need
         // to visit a node twice (in opposite orientations) and thus might get
@@ -239,11 +234,9 @@ std::vector<std::list<std::list<vg::NodeTraversal>>> bfs_left(vg::VG& graph,
             // lands in a place that is itself deleted.
             
             // Say we got to the right place
-            toReturn.at(flow - 1).emplace_back(std::move(path));
+            toReturn.emplace(bp_length(path), std::move(path));
             
-            // Don't bother looking for extensions, we already got there. If
-            // this path gets disqualified, extensions will also get
-            // disqualified.
+            // Don't bother looking for extensions, we already got there.
         } else if(path.size() <= maxDepth) {
             // We haven't hit the reference path yet, but we also haven't hit
             // the max depth. Extend with all the possible extensions.
@@ -255,65 +248,23 @@ std::vector<std::list<std::list<vg::NodeTraversal>>> bfs_left(vg::VG& graph,
             for(auto prevNode : prevNodes) {
                 // For each node we can get to
                 
-                // Is this an anchoring node?
-                bool isPrimaryPath = index.byId.count(prevNode.node->id());
-            
-                // What's its copy number effect? We just say we can push all
-                // the flow if we hit the reference.
-                auto nodeCopyNumber = isPrimaryPath ? flow : nodeCopyNumbers.at(prevNode.node);
-                
-                // How much flow can we push if we add it to the path
-                auto newMaxPushable = std::min(nodeCopyNumber, flow);
-                
-                if(newMaxPushable == 0) {
-                    // Skip this node; we can't use any copies of it.
-                    continue;
-                }
-                // We aren't built to handle copy numbers > 2.
-                assert(newMaxPushable <= 2);
-                
-                if(stopIfVisited) {
-                    // Have we found a way to visit this node with this much copy
-                    // number or more already?
-                    bool alreadyVisited = false;
-                    for(auto i = alreadyQueued.size() - 1; i != newMaxPushable - 2; i--) {
-                        // For all the alreadyQueued sets at copy numbers at or
-                        // above what we can push to this node along this path, see
-                        // if we already have a way to reach this node.
-                        if(alreadyQueued.at(i).count(prevNode)) {
-                            alreadyVisited = true;
-                            break;
-                        }
-                    }
-                    if(alreadyVisited) {
-                        // We already have a way to get here that's this good or
-                        // better.
-                        break;
-                    }
+                if(stopIfVisited && alreadyQueued.count(prevNode)) {
+                    // We already have a way to get here.
+                    break;
                 }
             
                 // Make a new path extended left with the node
                 std::list<vg::NodeTraversal> extended(path);
                 extended.push_front(prevNode);
-                toExtend.emplace_back(std::move(extended), newMaxPushable);
+                toExtend.emplace_back(std::move(extended));
                 stillToExtend++;
                 
                 // Remember we found a way to this node, so we don't try and
                 // visit it other ways.
-                alreadyQueued.at(newMaxPushable - 1).insert(prevNode);
+                alreadyQueued.insert(prevNode);
             }
         }
         
-    }
-    
-    // When we get here, we've found at least one of the paths to reference
-    // nodes at each possible length, with max pushable copy number.
-    
-    // We want them sorted long to short.
-    
-    for(auto& paths : toReturn) {
-        // Paths were added short to long, so spit them out long to short.
-        paths.reverse();
     }
     
     return toReturn;
@@ -328,28 +279,28 @@ vg::NodeTraversal flip(vg::NodeTraversal toFlip) {
 
 /**
  * Do a breadth-first search right from the given node traversal, and return
- * maximal-copy-number, node list paths starting at the given node and ending on
- * the indexed reference path. The paths are broken up into lists in order of
- * descending copy number, with paths sorted within each list in order of
- * decreasign length.
+ * lengths and paths starting at the given node and ending on the indexed
+ * reference path.
  */
-std::vector<std::list<std::list<vg::NodeTraversal>>> bfs_right(vg::VG& graph,
-    vg::NodeTraversal node, const ReferenceIndex& index,
-    const std::map<vg::Node*, size_t>& nodeCopyNumbers, int64_t maxDepth = 10) {
+std::set<std::pair<size_t, std::list<vg::NodeTraversal>>> bfs_right(vg::VG& graph,
+    vg::NodeTraversal node, const ReferenceIndex& index, int64_t maxDepth = 10,
+    bool stopIfVisited = false) {
 
     // Look left from the backward version of the node.
-    std::vector<std::list<std::list<vg::NodeTraversal>>> toReturn = bfs_left(graph, flip(node), index, nodeCopyNumbers, maxDepth);
+    auto toConvert = bfs_left(graph, flip(node), index, maxDepth, stopIfVisited);
     
-    for(auto& pathGroup : toReturn) {
-        for(auto& path : pathGroup) {
-            // Invert the order of every path in palce
-            path.reverse();
-            
-            for(auto& traversal : path) {
-                // And invert the orientation of every node in the path in place.
-                traversal = flip(traversal);
-            }
+    // Since we can't modify set records in place, we need to do a copy
+    std::set<std::pair<size_t, std::list<vg::NodeTraversal>>> toReturn;
+    
+    for(auto lengthAndPath : toConvert) {
+        // Flip every path to run the other way
+        lengthAndPath.second.reverse();
+        for(auto& traversal : lengthAndPath.second) {
+            // And invert the orientation of every node in the path in place.
+            traversal = flip(traversal);
         }
+        // Stick it in the new set
+        toReturn.emplace(std::move(lengthAndPath));
     }
     
     return toReturn;
@@ -357,30 +308,25 @@ std::vector<std::list<std::list<vg::NodeTraversal>>> bfs_right(vg::VG& graph,
 
 /**
  * Given a vg graph, a node in the graph, and an index for the reference path,
- * look out from the node in both directions to find a bubble relative to the
- * path, with a consistent orientation, such that the bubble has the maximum
- * copy number pushable along it, and such that it is the shortest bubble on
- * each side for that copy number. The bubble may not visit the same node twice.
+ * look out from the node in both directions to find a shortest bubble relative
+ * to the path, with a consistent orientation. The bubble may not visit the same
+ * node twice.
  *
  * Takes a max depth for the searches producing the paths on each side.
  * 
  * Return the ordered and oriented nodes in the bubble, with the outer nodes
  * being oriented forward along the named path, and with the first node coming
- * before the last node in the reference. Needs a set of nodes identified as
- * entirely present, so it can search paths using only those nodes.
+ * before the last node in the reference.
  */
-std::pair<std::vector<vg::NodeTraversal>, size_t>
+std::vector<vg::NodeTraversal>
 find_bubble(vg::VG& graph, vg::Node* node, const ReferenceIndex& index,
-const std::map<vg::Node*, size_t>& nodeCopyNumbers, int64_t maxDepth = 10) {
+    int64_t maxDepth = 10) {
 
     // Find paths on both sides, with nodes on the primary path at the outsides
-    // and this node in the middle. Returns paths stratified by copy number, so
-    // you want to comapre the first pair of lists first, then things in each
-    // first list with the other second list, then things in each first and
-    // second list with the other third list, and so on (if we ever went that
-    // far).
-    auto leftPaths = bfs_left(graph, vg::NodeTraversal(node), index, nodeCopyNumbers, maxDepth);
-    auto rightPaths = bfs_right(graph, vg::NodeTraversal(node), index, nodeCopyNumbers, maxDepth);
+    // and this node in the middle. Returns path lengths and paths in pairs in a
+    // set.
+    auto leftPaths = bfs_left(graph, vg::NodeTraversal(node), index, maxDepth);
+    auto rightPaths = bfs_right(graph, vg::NodeTraversal(node), index, maxDepth);
     
     // Find a combination of two paths which gets us to the reference in a
     // consistent orientation (meaning that when you look at the ending nodes'
@@ -388,7 +334,7 @@ const std::map<vg::Node*, size_t>& nodeCopyNumbers, int64_t maxDepth = 10) {
     // orientations) and which doesn't use the same nodes on both sides.
     
     // We need to look in different combinations of lists.
-    auto testCombination = [&](const std::list<std::list<vg::NodeTraversal>>& leftList,
+    auto testCombinations = [&](const std::list<std::list<vg::NodeTraversal>>& leftList,
         const std::list<std::list<vg::NodeTraversal>>& rightList) {
 
         for(auto leftPath : leftList) {
@@ -482,16 +428,6 @@ const std::map<vg::Node*, size_t>& nodeCopyNumbers, int64_t maxDepth = 10) {
                         }
                     }
                     
-                    // Count up max copy number pushable.
-                    // TODO: we check the main node twice.
-                    size_t maxPushable = nodeCopyNumbers.at(node);
-                    for(auto traversal : fullPath) {
-                        // Limit to the narrowest node on the path, not counting the reference nodes.
-                        if(!index.byId.count(traversal.node->id())) {
-                            maxPushable = std::min(maxPushable, nodeCopyNumbers.at(traversal.node));
-                        }
-                    }
-                    
                     // Just give the first valid path we find.
 #ifdef debug        
                     std::cerr << "Merged path:" << std::endl;
@@ -499,41 +435,31 @@ const std::map<vg::Node*, size_t>& nodeCopyNumbers, int64_t maxDepth = 10) {
                         std::cerr << "\t" << traversal << std::endl;
                     }
 #endif
-                    return std::make_pair(fullPath, maxPushable);
+                    return fullPath;
                 }
                 
             }
         }
         
-        // Return no copy number through no path if we can't find anything.
-        return std::make_pair(std::vector<vg::NodeTraversal>(), (size_t) 0);
+        // Return the empty path if we can't find anything.
+        return std::vector<vg::NodeTraversal>();
         
     };
     
-    // Try all the groups of lists stratified by copy number and return the best
-    // thing we find. TODO: since copy numbers can only go up to 2 we're just
-    // going to hardcode this. We really should generate it.
-    assert(leftPaths.size() <= 2);
-    assert(rightPaths.size() <= 2);
-    
-    std::vector<std::pair<int, int>> ordering = {{0, 0}, {0, 1}, {1, 0}, {1, 1}};
-    for(auto indexes : ordering) {
-        if(indexes.first >= leftPaths.size() || indexes.second >= rightPaths.size()) {
-            // We don't have that many path groups
-            continue;
-        }
-        
-        // Look for a valid combination in this tranche
-        auto result = testCombination(leftPaths[indexes.first], rightPaths[indexes.second]);
-        
-        if(result.second > 0) {
-            // We found one!
-            return result;
-        }
+    // Convert sets to lists, which requires a copy again...
+    std::list<std::list<vg::NodeTraversal>> leftConverted;
+    for(auto lengthAndPath : leftPaths) {
+        leftConverted.emplace_back(std::move(lengthAndPath.second));
+    }
+    std::list<std::list<vg::NodeTraversal>> rightConverted;
+    for(auto lengthAndPath : rightPaths) {
+        rightConverted.emplace_back(std::move(lengthAndPath.second));
     }
     
-    // No combinations found in any tranche.
-    return std::make_pair(std::vector<vg::NodeTraversal>(), 0);
+    // Look for a valid combination, or return an empty path if one iesn't
+    // found.
+    return testCombinations(leftConverted, rightConverted);
+    
 }
 
 
@@ -844,9 +770,9 @@ int main(int argc, char** argv) {
     // Parse it into an internal format, where we track status and copy number
     // for nodes and edges.
     
-    // This holds copy numbers for all the nodes we have copy numbers called
+    // This holds read support for all the nodes we have read support provided
     // for, by the node pointer in the vg graph.
-    std::map<vg::Node*, size_t> nodeCopyNumbers;
+    std::map<vg::Node*, size_t> nodeReadSupport;
     // This holds all the edges that are deletions, by the pointer to the stored
     // Edge object in the VG graph
     std::set<vg::Edge*> deletionEdges;
@@ -910,27 +836,22 @@ int main(int argc, char** argv) {
                 // Put it down as copy number 0 so we don't try and path through
                 // it. TODO: just make the pathing code treat no-CN-stored nodes
                 // as unusable.
-                nodeCopyNumbers[vg.get_node(nodeId)] = 0;
+                nodeReadSupport[vg.get_node(nodeId)] = 0;
 
             }
             
-            // Read the copy number
-            size_t copyNumber;
-            tokens >> copyNumber;
+            // Read the read support
+            size_t readSupport;
+            if(tokens >> readSupport) {
+                // For nodes with the number there, actually process the read support
             
-            if(callType != "U") {
-                // For called nodes, actually process the copy number
-            
-                assert(0 <= copyNumber);
-                assert(copyNumber <= 2);
-                
-    #ifdef debug
+#ifdef debug
                 std::cerr << "Line " << std::to_string(lineNumber) << ": Node " << nodeId
-                    << " has copy number " << copyNumber << endl;
-    #endif
+                    << " has read support " << readSupport << endl;
+#endif
                 
                 // Save it
-                nodeCopyNumbers[nodePointer] = copyNumber;
+                nodeReadSupport[nodePointer] = readSupport;
                 
                 if(callType == "R") {
                     // Note that this is a reference node
@@ -1077,28 +998,11 @@ int main(int argc, char** argv) {
             return;
         }
         
-        while(nodeCopyNumbers.at(node) > 0) {
-            // We still have copy number on this node.
+        if(nodeReadSupport.at(node) > 0) {
+            // We have copy number on this node.
             
-            // Find a path to the primary reference from here that can use maximal copy number
-            auto found = find_bubble(vg, node, index, nodeCopyNumbers, maxDepth);
-            
-            // Break out the actual path of NodeTraversals and the max copy number we can push.
-            auto& path = found.first;
-            auto& canPush = found.second;
-            
-            if(canPush == 0) {
-                // If we can't find one, complain we discarded this node's worth
-                // of variation (* copy number?)
-                std::cerr << "Can't account for " << nodeCopyNumbers.at(node) <<
-                    " copies of node " << node->id() << " length " <<
-                    node->sequence().size() << std::endl;
-                
-                basesLost += node->sequence().size();
-                
-                // Skip this node and move on to the next
-                break;
-            }
+            // Find a path to the primary reference from here
+            auto path = find_bubble(vg, node, index, maxDepth);
             
             // Turn it into a substitution/insertion
             
@@ -1134,8 +1038,10 @@ int main(int argc, char** argv) {
             // Variants should be reference if most of their bases are
             // reference, and novel otherwise. A single SNP base on a known
             // insert should not make it a novel insert.
-            size_t knownBases = 0;
-            size_t totalBases = 0;
+            size_t knownAltBases = 0;
+            
+            // How many alt bases are there overall, both known and novel?
+            size_t altBases = 0;
             
             // We also need a list of all the alt node IDs for anming the
             // variant.
@@ -1145,6 +1051,10 @@ int main(int argc, char** argv) {
             // ref and alt sides
             std::set<vg::Node*> refInvolvedNodes;
             std::set<vg::Node*> altInvolvedNodes;
+            
+            // And we want to know how much read support in total ther alt has
+            // (support * node length)
+            size_t altReadSupportTotal = 0;
             
             for(int64_t i = 1; i < path.size() - 1; i++) {
                 // For all but the first and last nodes, grab their sequences in
@@ -1160,9 +1070,6 @@ int main(int argc, char** argv) {
                 // Stick the sequence
                 altStream << addedSequence;
                 
-                // Debit copy number.
-                nodeCopyNumbers[path[i].node] -= canPush;
-                
                 // Record ID
                 idStream << std::to_string(path[i].node->id());
                 if(i != path.size() - 2) {
@@ -1174,13 +1081,18 @@ int main(int argc, char** argv) {
                 // Record involvement
                 altInvolvedNodes.insert(path[i].node);
                 
+                if(nodeReadSupport.count(path[i].node)) {
+                    // We have read support for this node. Add it in to the total support for the alt.
+                    altReadSupportTotal += path[i].node->sequence().size() * nodeReadSupport.at(path[i].node);
+                }
+                
                 if(knownNodes.count(path[i].node)) {
                     // This is a reference node.
-                    knownBases += path[i].node->sequence().size();
+                    knownAltBases += path[i].node->sequence().size();
                 }
                 // We always need to add in the length of the node to the total
                 // length
-                totalBases += path[i].node->sequence().size();
+                altBases += path[i].node->sequence().size();
             }
 
 
@@ -1193,8 +1105,8 @@ int main(int argc, char** argv) {
                 altIds.insert(visit.node->id());
             }
 
-            // Holds total primary path base copies observed as not deleted.
-            double refCopyNumberTotal = 0;
+            // Holds total primary path base readings observed (read support * node length).
+            double refReadSupportTotal = 0;
             // And total bases of material we looked at on the primary path and
             // not this alt
             size_t refBases = 0;
@@ -1238,22 +1150,25 @@ int main(int argc, char** argv) {
                 // Say we saw these bases, which may or may not have been called present
                 refBases += refNode->sequence().size();
 #ifdef debug
-                std::cerr << "Node " << refNode->id() << " has " << nodeCopyNumbers.at(refNode) << " copies" << std::endl;
+                std::cerr << "Node " << refNode->id() << " has " << nodeReadSupport.at(refNode) << " copies" << std::endl;
 #endif
                 
                 // Count the bases we see not deleted
-                refCopyNumberTotal += refNode->sequence().size() * nodeCopyNumbers.at(refNode);
+                refReadSupportTotal += refNode->sequence().size() * nodeReadSupport.at(refNode);
             }
             
 #ifdef debug
-            std::cerr << idStream.str() << " ref alternative: " << refCopyNumberTotal << "/" << refBases
+            std::cerr << idStream.str() << " ref alternative: " << refReadSupportTotal << "/" << refBases
                 << " from " << referenceIntervalStart << " to " << referenceIntervalPastEnd << std::endl;
 #endif
             
-            // We divide the copy number of stuff passed over by the total bases
-            // of stuff passed over to get the copy number we should have of
-            // primary path alleles.
-            double copyNumberPrimaryReference = refBases == 0 ? 0 : refCopyNumberTotal / refBases;
+            // We divide the read support of stuff passed over by the total
+            // bases of stuff passed over to get the average read support for
+            // the primary path allele.
+            double refReadSupportAverage = refBases == 0 ? 0 : (double)refReadSupportTotal / refBases;
+            
+            // And similarly for the alt
+            double altReadSupportAverage = altBases == 0 ? 0 : (double)altReadSupportTotal / altBases;
             
             // Make the variant and emit it.
             std::string refAllele = index.sequence.substr(
@@ -1268,7 +1183,7 @@ int main(int argc, char** argv) {
             variant.position = referenceIntervalStart + 1 + variantOffset;
             variant.id = idStream.str();
             
-            if(knownBases >= totalBases / 2) {
+            if(knownAltBases >= altBases / 2) {
                 // Flag the variant as reference. Don't put in a false entry if
                 // it isn't, because vcflib will spit out the flag anyway...
                 variant.infoFlags["XREF"] = true;
@@ -1321,23 +1236,20 @@ int main(int argc, char** argv) {
             variant.format.push_back("GT");
             auto& genotype = variant.samples[sampleName]["GT"];
             
-            if(canPush == 1) {
-                // We're allele alt and ref heterozygous.
+            if(refReadSupportAverage > 2 * altReadSupportAverage) {
+                // Say it's hom ref
+                genotype.push_back("0/0");
+            } else if(altReadSupportAverage > 2 * refReadSupportAverage) {
+                // Say it's hom alt
+                genotype.push_back(std::to_string(altNumber) + "/" + std::to_string(altNumber));
+            } else if(refReadSupportAverage + altReadSupportAverage > 4) {
+                // Say it's het
                 genotype.push_back(std::to_string(altNumber) + "/0");
-            } else if(canPush == 2) {
-                if(copyNumberPrimaryReference < 0.5) {
-                    // We're alt homozygous, other overlapping variants notwithstanding.
-                    genotype.push_back(std::to_string(altNumber) + "/" + std::to_string(altNumber));
-                } else {
-                    // We have good evicence of both ref and alt here.
-                    // Say we're het but give a warning
-                    genotype.push_back(std::to_string(altNumber) + "/0");
-                    std::cerr << "Warning: copy numbers don't add up consistently for " << variant.id << "; assuming het" << endl;
-                }
             } else {
-                // We're something weird
-                throw std::runtime_error("Invalid copy number for alt: " + std::to_string(canPush));
+                // Say we have no idea
+                genotype.push_back("./.");
             }
+            // TODO: use legit thresholds here.
             
 #ifdef debug
             std::cerr << "Found variant " << refAllele << " -> " << altAllele
@@ -1441,9 +1353,9 @@ int main(int argc, char** argv) {
         std::cerr << "Deletion " << edgeName << " bookended by " << fromBase << " and " << toBase << std::endl;
 #endif
         
-        // Guess the copy number of the deletion
-        // Holds total base copies observed as not deleted.
-        double copyNumberTotal = 0;
+        // Guess the copy number of the deletion.
+        // Holds total base copies (node length * read support) observed as not deleted.
+        double refReadSupportTotal = 0;
         int64_t deletedNodeStart = fromBase + 1;
         while(deletedNodeStart != toBase) {
 #ifdef debug
@@ -1456,30 +1368,32 @@ int main(int argc, char** argv) {
             // Even if it previously existed in the reference.
             deletedNodeStart += deletedNode->sequence().size();
             
-            // Count the bases we see not deleted
-            copyNumberTotal += deletedNode->sequence().size() * nodeCopyNumbers.at(deletedNode);
+            // Count the read observations we see not deleted
+            refReadSupportTotal += deletedNode->sequence().size() * nodeReadSupport.at(deletedNode);
         }
         
-        // We divide the copy number by the total bases deleted to get the copy
-        // number remaining.
-        double copyNumberRemaining = copyNumberTotal / (toBase - fromBase - 1);
+        // We divide the total read support by the total bases deleted to get
+        // the average read support for the reference.
+        double refReadSupportAverage = (double)refReadSupportTotal / (toBase - fromBase - 1);
         
-        // And then we can work out how much was deleted, on average
-        double copyNumberDeleted = 2.0 - copyNumberRemaining;
+        // TODO: can we get the support for the edge itself?
         
         // What copy number do we call for the deletion?
         int64_t copyNumberCall = 2;
         // Having an edge at all means it's supported by the reads, so the
         // presence of a deletion edge in the tsv means that we should call at
         // least one copy deleted, regardless of node copy numbers.
-        if(copyNumberDeleted < 1.5) {
+        if(refReadSupportAverage >= 15) {
             // We should round down to just 1 copy deleted.
             copyNumberCall = 1;
         }
+        if(refReadSupportAverage >= 30) {
+            // We should round down to just 0 copies deleted, actually.
+            copyNumberCall = 0;
+        }
         
         if(copyNumberCall == 0) {
-            // This deletion has no copies deleted and should not be called in
-            // this sample at all.
+            // Actually don't call a deletion
             continue;
         }
         
