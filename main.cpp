@@ -633,6 +633,7 @@ void help_main(char** argv) {
         << "    -l, --length INT    override total sequence length" << std::endl
         << "    -d, --depth INT     maximum depth for path search (default 10 nodes)" << std::endl
         << "    -p, --pileup FILE   filename for a pileup to use to annotate variants" << std::endl
+        << "    -m, --min_fraction  min fraction of average coverage at which to call" << std::endl
         << "    -h, --help          print this help message" << std::endl;
 }
 
@@ -662,6 +663,9 @@ int main(int argc, char** argv) {
     // Should we load a pileup and print out pileup info as comments after
     // variants?
     std::string pileupFilename;
+    // What fraction of average coverage should be the minimum to call a variant (or a single copy)?
+    // We set a sane default so we don't spit out loads of spurious calls
+    double minFractionForCall = 0.2;
     
     optind = 1; // Start at first real argument
     bool optionsRemaining = true;
@@ -674,13 +678,14 @@ int main(int argc, char** argv) {
             {"depth", required_argument, 0, 'd'},
             {"length", required_argument, 0, 'l'},
             {"pileup", required_argument, 0, 'p'},
+            {"min_fraction", required_argument, 0, 'm'},
             {"help", no_argument, 0, 'h'},
             {0, 0, 0, 0}
         };
 
         int optionIndex = 0;
 
-        char option = getopt_long(argc, argv, "r:c:s:o:d:l:p:h", longOptions, &optionIndex);
+        char option = getopt_long(argc, argv, "r:c:s:o:d:l:p:m:h", longOptions, &optionIndex);
         switch(option) {
         // Option value is in global optarg
         case 'r':
@@ -710,6 +715,10 @@ int main(int argc, char** argv) {
         case 'p':
             // Set a pileup filename
             pileupFilename = optarg;
+            break;
+        case 'm':
+            // Set miun fraction of average coverage for a call
+            minFractionForCall = std::stod(optarg);
             break;
         case -1:
             optionsRemaining = false;
@@ -1253,17 +1262,23 @@ int main(int argc, char** argv) {
             variant.format.push_back("GT");
             auto& genotype = variant.samples[sampleName]["GT"];
             
-            if(refReadSupportAverage > 2 * altReadSupportAverage) {
-                // Say it's hom ref
-                genotype.push_back("0/0");
-            } else if(altReadSupportAverage > 2 * refReadSupportAverage) {
-                // Say it's hom alt
-                genotype.push_back(std::to_string(altNumber) + "/" + std::to_string(altNumber));
-            } else if(refReadSupportAverage + altReadSupportAverage > primaryPathAverageSupport/2) {
-                // Say it's het
-                genotype.push_back("0/" + std::to_string(altNumber));
+            
+            // We're going to make some really bad calls at low depth. We can
+            // pull them out with a depth filter, but for now just elide them.
+            if(refReadSupportAverage + altReadSupportAverage > primaryPathAverageSupport * minFractionForCall) {
+                if(refReadSupportAverage > 2 * altReadSupportAverage) {
+                    // Say it's hom ref
+                    genotype.push_back("0/0");
+                } else if(altReadSupportAverage > 2 * refReadSupportAverage) {
+                    // Say it's hom alt
+                    genotype.push_back(std::to_string(altNumber) + "/" + std::to_string(altNumber));
+                } else {
+                    // Say it's het
+                    genotype.push_back("0/" + std::to_string(altNumber));
+                } 
             } else {
-                // Say we have no idea
+                // Depth too low. Say we have no idea.
+                // TODO: elide variant?
                 genotype.push_back("./.");
             }
             // TODO: use legit thresholds here.
@@ -1412,12 +1427,17 @@ int main(int argc, char** argv) {
         // Having an edge at all means it's supported by the reads, so the
         // presence of a deletion edge in the tsv means that we should call at
         // least one copy deleted, regardless of node copy numbers.
-        if(refReadSupportAverage >= 15) {
+        if(refReadSupportAverage >= primaryPathAverageSupport / 4) {
             // We should round down to just 1 copy deleted.
             copyNumberCall = 1;
         }
-        if(refReadSupportAverage >= 30) {
-            // We should round down to just 0 copies deleted, actually.
+        if(refReadSupportAverage >= primaryPathAverageSupport / 2) {
+            // We should round down to 0 copies deleted, actually.
+            copyNumberCall = 0;
+        }
+        if(refReadSupportAverage > primaryPathAverageSupport * minFractionForCall) {
+            // According to our user-specified threshold, we can't be missing
+            // any copies
             copyNumberCall = 0;
         }
         
