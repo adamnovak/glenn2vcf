@@ -633,7 +633,9 @@ void help_main(char** argv) {
         << "    -l, --length INT    override total sequence length" << std::endl
         << "    -d, --depth INT     maximum depth for path search (default 10 nodes)" << std::endl
         << "    -p, --pileup FILE   filename for a pileup to use to annotate variants" << std::endl
-        << "    -m, --min_fraction  min fraction of average coverage at which to call" << std::endl
+        << "    -f, --min_fraction  min fraction of average coverage at which to call" << std::endl
+        << "    -b, --max_het_bias  max imbalance factor between alts to call heterozygous" << std::endl
+        << "    -n, --min_count     min total supporting read count to call a variant" << std::endl
         << "    -h, --help          print this help message" << std::endl;
 }
 
@@ -664,8 +666,17 @@ int main(int argc, char** argv) {
     // variants?
     std::string pileupFilename;
     // What fraction of average coverage should be the minimum to call a variant (or a single copy)?
-    // We set a sane default so we don't spit out loads of spurious calls
-    double minFractionForCall = 0.2;
+    // Default to 0 because vg call is still applying depth thresholding
+    double minFractionForCall = 0;
+    // What fraction of the reads supporting an alt are we willing to discount?
+    // At 2, if twice the reads support one allele as the other, we'll call
+    // homozygous instead of heterozygous. At infinity, every call will be
+    // heterozygous if even one read supports each allele.
+    double maxHetBias = 20;
+    // What's the minimum integer number of reads that must support a call? We
+    // don't necessarily want to call a SNP as het because we have a single
+    // supporting read, even if there are only 10 reads on the site.
+    size_t minTotalSupportForCall = 2;
     
     optind = 1; // Start at first real argument
     bool optionsRemaining = true;
@@ -678,14 +689,16 @@ int main(int argc, char** argv) {
             {"depth", required_argument, 0, 'd'},
             {"length", required_argument, 0, 'l'},
             {"pileup", required_argument, 0, 'p'},
-            {"min_fraction", required_argument, 0, 'm'},
+            {"min_fraction", required_argument, 0, 'f'},
+            {"max_het_bias", required_argument, 0, 'b'},
+            {"min_count", required_argument, 0, 'n'},
             {"help", no_argument, 0, 'h'},
             {0, 0, 0, 0}
         };
 
         int optionIndex = 0;
 
-        char option = getopt_long(argc, argv, "r:c:s:o:d:l:p:m:h", longOptions, &optionIndex);
+        char option = getopt_long(argc, argv, "r:c:s:o:d:l:p:f:b:n:h", longOptions, &optionIndex);
         switch(option) {
         // Option value is in global optarg
         case 'r':
@@ -716,9 +729,19 @@ int main(int argc, char** argv) {
             // Set a pileup filename
             pileupFilename = optarg;
             break;
-        case 'm':
-            // Set miun fraction of average coverage for a call
+        case 'f':
+            // Set min fraction of average coverage for a call
             minFractionForCall = std::stod(optarg);
+            break;
+        case 'b':
+            // Set max factor between reads on one alt and reads on the other
+            // alt for calling a het.
+            maxHetBias = std::stod(optarg);
+            break;
+        case 'n':
+            // How many reads need to touch an allele before we are willing to
+            // call it?
+            minTotalSupportForCall = std::stoll(optarg);
             break;
         case -1:
             optionsRemaining = false;
@@ -785,6 +808,8 @@ int main(int argc, char** argv) {
     // This holds read support for all the nodes we have read support provided
     // for, by the node pointer in the vg graph.
     std::map<vg::Node*, size_t> nodeReadSupport;
+    // And read support for the edges
+    std::map<vg::Edge*, size_t> edgeReadSupport;
     // This holds all the edges that are deletions, by the pointer to the stored
     // Edge object in the VG graph
     std::set<vg::Edge*> deletionEdges;
@@ -912,6 +937,9 @@ int main(int argc, char** argv) {
                 throw std::runtime_error("Line " + std::to_string(lineNumber) + ": Edge " + edgeDescription + " not in graph.");
             }
             
+            // Get the edge
+            vg::Edge* edgePointer = vg.get_edge(std::make_pair(fromSide, toSide));
+            
             // Parse the mode
             std::string mode;
             tokens >> mode;
@@ -924,8 +952,6 @@ int main(int argc, char** argv) {
                     << edgeDescription << " may describe a deletion." << endl;
 #endif
 
-                vg::Edge* edgePointer = vg.get_edge(std::make_pair(fromSide, toSide));
-                
                 // Say it's a deletion
                 deletionEdges.insert(edgePointer);
                 
@@ -938,6 +964,20 @@ int main(int argc, char** argv) {
 #endif
                 }
 
+            }
+            
+            // Read the read support
+            size_t readSupport;
+            if(tokens >> readSupport) {
+                // For nodes with the number there, actually process the read support
+            
+#ifdef debug
+                std::cerr << "Line " << std::to_string(lineNumber) << ": Edge " << edgeDescription
+                    << " has read support " << readSupport << endl;
+#endif
+                
+                // Save it
+                edgeReadSupport[edgePointer] = readSupport;
             }
         
         } else {
@@ -1265,17 +1305,24 @@ int main(int argc, char** argv) {
             
             // We're going to make some really bad calls at low depth. We can
             // pull them out with a depth filter, but for now just elide them.
-            if(refReadSupportAverage + altReadSupportAverage > primaryPathAverageSupport * minFractionForCall) {
-                if(refReadSupportAverage > 2 * altReadSupportAverage) {
+            if(refReadSupportAverage + altReadSupportAverage >= primaryPathAverageSupport * minFractionForCall) {
+                if(refReadSupportAverage > maxHetBias * altReadSupportAverage &&
+                    refReadSupportTotal >= minTotalSupportForCall) {
+                    // Biased enough towards ref, and ref has enough total reads.
                     // Say it's hom ref
                     genotype.push_back("0/0");
-                } else if(altReadSupportAverage > 2 * refReadSupportAverage) {
+                } else if(altReadSupportAverage > maxHetBias * refReadSupportAverage
+                    && altReadSupportTotal >= minTotalSupportForCall) {
                     // Say it's hom alt
                     genotype.push_back(std::to_string(altNumber) + "/" + std::to_string(altNumber));
-                } else {
+                } else if(refReadSupportTotal >= minTotalSupportForCall &&
+                    altReadSupportTotal >= minTotalSupportForCall) {
                     // Say it's het
                     genotype.push_back("0/" + std::to_string(altNumber));
-                } 
+                } else {
+                    // We can't really call this as anything.
+                    genotype.push_back("./.");
+                }
             } else {
                 // Depth too low. Say we have no idea.
                 // TODO: elide variant?
@@ -1397,6 +1444,9 @@ int main(int argc, char** argv) {
         std::cerr << "Deletion " << edgeName << " bookended by " << fromBase << " and " << toBase << std::endl;
 #endif
         
+        // What original node:offset places do we care about?
+        std::set<std::pair<int64_t, size_t>> crossreferences;
+        
         // Guess the copy number of the deletion.
         // Holds total base copies (node length * read support) observed as not deleted.
         double refReadSupportTotal = 0;
@@ -1414,32 +1464,54 @@ int main(int argc, char** argv) {
             
             // Count the read observations we see not deleted
             refReadSupportTotal += deletedNode->sequence().size() * nodeReadSupport.at(deletedNode);
+            
+            // Add the beginning of this node as a see also. The deletion is
+            // stored at the beginning of the first node, and the other
+            // locations will help us get an idea of how much support the
+            // deleted stuff has.
+            crossreferences.insert(nodeSources.at(deletedNode));
         }
         
         // We divide the total read support by the total bases deleted to get
         // the average read support for the reference.
         double refReadSupportAverage = (double)refReadSupportTotal / (toBase - fromBase - 1);
         
-        // TODO: can we get the support for the edge itself?
+        // Get the support for the edge itself?
+        size_t altReadSupportTotal = edgeReadSupport.count(deletion) ? edgeReadSupport[deletion] : 0;
+        
+        // No sense averaging the deletion edge read support because there are no bases.
+        
         
         // What copy number do we call for the deletion?
         int64_t copyNumberCall = 2;
-        // Having an edge at all means it's supported by the reads, so the
-        // presence of a deletion edge in the tsv means that we should call at
-        // least one copy deleted, regardless of node copy numbers.
-        if(refReadSupportAverage >= primaryPathAverageSupport / 4) {
-            // We should round down to just 1 copy deleted.
-            copyNumberCall = 1;
-        }
-        if(refReadSupportAverage >= primaryPathAverageSupport / 2) {
-            // We should round down to 0 copies deleted, actually.
+        
+        // We're going to make some really bad calls at low depth. We can
+        // pull them out with a depth filter, but for now just elide them.
+        if(refReadSupportAverage + altReadSupportTotal >= primaryPathAverageSupport * minFractionForCall) {
+            if(refReadSupportAverage > maxHetBias * altReadSupportTotal &&
+                refReadSupportTotal >= minTotalSupportForCall) {
+                // Say it's hom ref
+                copyNumberCall = 0;
+            } else if(altReadSupportTotal > maxHetBias * refReadSupportAverage &&
+                altReadSupportTotal >= minTotalSupportForCall) {
+                // Say it's hom alt
+                copyNumberCall = 2;
+            } else if(refReadSupportTotal >= minTotalSupportForCall &&
+                altReadSupportTotal >= minTotalSupportForCall) {
+                // Say it's het
+                copyNumberCall = 1;
+            } else {
+                // We're not biased enough towards either homozygote, but we
+                // don't have enough support for each allele to call het.
+                // TODO: we just don't call
+                copyNumberCall = 0;
+            }
+        } else {
+            // Depth too low. Don't call.
             copyNumberCall = 0;
         }
-        if(refReadSupportAverage > primaryPathAverageSupport * minFractionForCall) {
-            // According to our user-specified threshold, we can't be missing
-            // any copies
-            copyNumberCall = 0;
-        }
+        // TODO: use legit thresholds here.
+        
         
         if(copyNumberCall == 0) {
             // Actually don't call a deletion
@@ -1476,37 +1548,6 @@ int main(int argc, char** argv) {
 #endif
         }
         
-        // What original node:offset places do we care about?
-        std::set<std::pair<int64_t, size_t>> crossreferences;
-        
-        vg::Node* startNode = vg.get_node(deletion->from());
-        if(nodeSources.count(startNode)) {
-            // We can point to the right place on the start node
-            auto& source = nodeSources.at(startNode);
-            
-            if(deletion->from_start()) {
-                // The right place is where it starts
-                crossreferences.insert(source);
-            } else {
-                // The right place is where it ends
-                crossreferences.insert(std::make_pair(source.first, startNode->sequence().size() - 1 + source.second));
-            }
-        }
-        
-        vg::Node* endNode = vg.get_node(deletion->to());
-        if(nodeSources.count(endNode)) {
-            // We can point to the right place on the end node
-            auto& source = nodeSources.at(endNode);
-            
-            if(deletion->to_end()) {
-                // The right place is where it ends
-                crossreferences.insert(std::make_pair(source.first, endNode->sequence().size() - 1 + source.second));
-            } else {
-                // The right place is where it starts
-                crossreferences.insert(source);
-            }
-        }
-        
         for(auto& crossreference : crossreferences) {
             // Add in all the deduplicated cross-references
             variant.info["XSEE"].push_back(std::to_string(crossreference.first) + ":" +
@@ -1535,7 +1576,7 @@ int main(int argc, char** argv) {
         }
         
         // Add depth for the variant and the samples
-        std::string depthString = std::to_string((int64_t)round(refReadSupportAverage));
+        std::string depthString = std::to_string((int64_t)round(refReadSupportAverage + altReadSupportTotal));
         variant.format.push_back("DP");
         variant.samples[sampleName]["DP"].push_back(depthString);
         variant.info["DP"].push_back(depthString); // We only have one sample, so variant depth = sample depth
@@ -1543,8 +1584,7 @@ int main(int argc, char** argv) {
         // Also allelic depths
         variant.format.push_back("AD");
         variant.samples[sampleName]["AD"].push_back(std::to_string((int64_t)round(refReadSupportAverage)));
-        // No depth for the deletion allele; we're only going by the ref depth for now
-        variant.samples[sampleName]["AD"].push_back(".");
+        variant.samples[sampleName]["AD"].push_back(std::to_string(altReadSupportTotal));
         
 #ifdef debug
         std::cerr << "Found variant " << refAllele << " -> " << altAllele
