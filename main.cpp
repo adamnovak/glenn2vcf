@@ -1070,6 +1070,13 @@ int main(int argc, char** argv) {
             // Find a path to the primary reference from here
             auto path = find_bubble(vg, node, index, maxDepth);
             
+            if(path.empty()) {
+                // We couldn't find a path back to the primary path. Discard
+                // this material.
+                basesLost += node->sequence().size();
+                return;
+            }
+            
             // Turn it into a substitution/insertion
             
             // The position we have stored for this start node is the first
