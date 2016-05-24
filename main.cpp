@@ -1234,7 +1234,7 @@ int main(int argc, char** argv) {
             std::cerr << idStream.str() << " ref alternative: " << refReadSupportTotal << "/" << refBases
                 << " from " << referenceIntervalStart << " to " << referenceIntervalPastEnd << std::endl;
 #endif
-            
+
             // We divide the read support of stuff passed over by the total
             // bases of stuff passed over to get the average read support for
             // the primary path allele.
@@ -1242,6 +1242,29 @@ int main(int argc, char** argv) {
             
             // And similarly for the alt
             double altReadSupportAverage = altBases == 0 ? 0 : (double)altReadSupportTotal / altBases;
+
+            if(refBases == 0) {
+                // There's no reference node; we're a pure insert. Like with
+                // deletions, we should look at the edge that bypasses us to see
+                // if there's any support for it.
+                
+                // We eant an edge from the end of the node before us to the
+                // start of the node after us.
+                std::pair<vg::NodeSide, vg::NodeSide> edgeWanted = std::make_pair(
+                    vg::NodeSide(path.front().node->id(), true),
+                    vg::NodeSide(path.back().node->id()));
+                
+                if(vg.has_edge(edgeWanted)) {
+                    // We found it!
+                    vg::Edge* bypass = vg.get_edge(edgeWanted);
+                    
+                    // Any reads supporting the edge bypassing the insert are
+                    // really ref support reads, and should count as supporting
+                    // the whole ref allele.
+                    refReadSupportAverage = edgeReadSupport.count(bypass) ? edgeReadSupport.at(bypass) : 0; 
+                }
+            }
+            // Otherwise if there's no edge or no support for that edge, the ref support should stay 0.
             
             // Make the variant and emit it.
             std::string refAllele = index.sequence.substr(
