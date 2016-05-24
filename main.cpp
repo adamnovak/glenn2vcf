@@ -1261,7 +1261,8 @@ int main(int argc, char** argv) {
                     // Any reads supporting the edge bypassing the insert are
                     // really ref support reads, and should count as supporting
                     // the whole ref allele.
-                    refReadSupportAverage = edgeReadSupport.count(bypass) ? edgeReadSupport.at(bypass) : 0; 
+                    refReadSupportTotal = edgeReadSupport.count(bypass) ? edgeReadSupport.at(bypass) : 0; 
+                    refReadSupportAverage = refReadSupportTotal;
                 }
             }
             // Otherwise if there's no edge or no support for that edge, the ref support should stay 0.
