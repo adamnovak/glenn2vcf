@@ -41,6 +41,72 @@ struct ReferenceIndex {
     std::string sequence;
 };
 
+// We represent support as a pair, but we define math for it.
+// We use doubles because we may need fractional math.
+typedef std::pair<double, double> Support;
+
+/**
+ * Add two Support values together, accounting for strand.
+ */
+Support operator+(const Support& one, const Support& other) {
+    return std::make_pair(one.first + other.first, one.second + other.second);
+}
+
+/**
+ * Add in a Support to another.
+ */
+Support& operator+=(Support& one, const Support& other) {
+    one.first += other.first;
+    one.second += other.second;
+    return one;
+}
+
+
+/**
+ * Scale a support by a factor.
+ */
+template<typename Scalar>
+Support operator*(const Support& support, const Scalar& scale) {
+    return std::make_pair(support.first * scale, support.second * scale);
+}
+
+/**
+ * Scale a support by a factor, the other way
+ */
+template<typename Scalar>
+Support operator*(const Scalar& scale, const Support& support) {
+    return std::make_pair(support.first * scale, support.second * scale);
+}
+
+/**
+ * Divide a support by a factor.
+ */
+template<typename Scalar>
+Support operator/(const Support& support, const Scalar& scale) {
+    return std::make_pair(support.first / scale, support.second / scale);
+}
+
+/**
+ * Allow printing a support.
+ */
+std::ostream& operator<<(std::ostream& stream, const Support& support) {
+    return stream << support.first << "," << support.second;
+}
+
+/**
+ * Get the total read support in a support.
+ */
+double total(const Support& support) {
+    return support.first + support.second;
+}
+
+/**
+ * Get the strand bias of a support.
+ */
+double strand_bias(const Support& support) {
+    return std::max(support.first, support.second) / (support.first + support.second);
+}
+
 /**
  * Make a letter into a full string because apparently that's too fancy for the
  * standard library.
@@ -63,6 +129,7 @@ void write_vcf_header(std::ostream& stream, std::string& sample_name, std::strin
     stream << "##FORMAT=<ID=DP,Number=1,Type=Integer,Description=\"Read Depth\">" << std::endl;
     stream << "##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">" << std::endl;
     stream << "##FORMAT=<ID=AD,Number=.,Type=Integer,Description=\"Allelic depths for the ref and alt alleles in the order listed\">" << std::endl;
+    stream << "##FORMAT=<ID=SB,Number=4,Type=Integer,Description=\"Forward and reverse support for ref and alt alleles.\">" << std::endl;
     if(!contig_name.empty()) {
         // Announce the contig as well.
         stream << "##contig=<ID=" << contig_name << ",length=" << contig_size << ">" << std::endl;
@@ -805,11 +872,11 @@ int main(int argc, char** argv) {
     // Parse it into an internal format, where we track status and copy number
     // for nodes and edges.
     
-    // This holds read support for all the nodes we have read support provided
-    // for, by the node pointer in the vg graph.
-    std::map<vg::Node*, size_t> nodeReadSupport;
+    // This holds read support, on each strand, for all the nodes we have read
+    // support provided for, by the node pointer in the vg graph.
+    std::map<vg::Node*, Support> nodeReadSupport;
     // And read support for the edges
-    std::map<vg::Edge*, size_t> edgeReadSupport;
+    std::map<vg::Edge*, Support> edgeReadSupport;
     // This holds all the edges that are deletions, by the pointer to the stored
     // Edge object in the VG graph
     std::set<vg::Edge*> deletionEdges;
@@ -873,18 +940,18 @@ int main(int argc, char** argv) {
                 // Put it down as copy number 0 so we don't try and path through
                 // it. TODO: just make the pathing code treat no-CN-stored nodes
                 // as unusable.
-                nodeReadSupport[vg.get_node(nodeId)] = 0;
+                nodeReadSupport[vg.get_node(nodeId)] = std::make_pair(0.0, 0.0);
 
             }
             
             // Read the read support
-            size_t readSupport;
-            if(tokens >> readSupport) {
+            Support readSupport;
+            if((tokens >> readSupport.first) && (tokens >> readSupport.second)) {
                 // For nodes with the number there, actually process the read support
             
 #ifdef debug
                 std::cerr << "Line " << std::to_string(lineNumber) << ": Node " << nodeId
-                    << " has read support " << readSupport << endl;
+                    << " has read support " << readSupport.first << "," << readSupport.second << endl;
 #endif
                 
                 // Save it
@@ -967,13 +1034,13 @@ int main(int argc, char** argv) {
             }
             
             // Read the read support
-            size_t readSupport;
-            if(tokens >> readSupport) {
+            Support readSupport;
+            if((tokens >> readSupport.first) && (tokens >> readSupport.second)) {
                 // For nodes with the number there, actually process the read support
             
 #ifdef debug
                 std::cerr << "Line " << std::to_string(lineNumber) << ": Edge " << edgeDescription
-                    << " has read support " << readSupport << endl;
+                    << " has read support " << readSupport.first << "," << readSupport.second << endl;
 #endif
                 
                 // Save it
@@ -994,7 +1061,7 @@ int main(int argc, char** argv) {
     
     // Crunch the numbers on the reference and its read support. How much read
     // support in total (node length * aligned reads) does the primary path get?
-    size_t primaryPathTotalSupport = 0;
+    Support primaryPathTotalSupport = std::make_pair(0.0, 0.0);
     for(auto& pointerAndSupport : nodeReadSupport) {
         if(index.byId.count(pointerAndSupport.first->id())) {
             // This is a primary path node. Add in the total read bases supporting it
@@ -1002,7 +1069,7 @@ int main(int argc, char** argv) {
         }
     }
     // Calculate average support in reads per base
-    double primaryPathAverageSupport = (double)primaryPathTotalSupport / index.sequence.size();
+    auto primaryPathAverageSupport = primaryPathTotalSupport / index.sequence.size();
     
     std::cerr << "Primary path average coverage: " << primaryPathAverageSupport << endl;
     
@@ -1064,7 +1131,7 @@ int main(int argc, char** argv) {
             return;
         }
         
-        if(nodeReadSupport.at(node) > 0) {
+        if(total(nodeReadSupport.at(node)) > 0) {
             // We have copy number on this node.
             
             // Find a path to the primary reference from here
@@ -1127,7 +1194,7 @@ int main(int argc, char** argv) {
             
             // And we want to know how much read support in total ther alt has
             // (support * node length)
-            size_t altReadSupportTotal = 0;
+            Support altReadSupportTotal = std::make_pair(0.0, 0.0);
             
             for(int64_t i = 1; i < path.size() - 1; i++) {
                 // For all but the first and last nodes, grab their sequences in
@@ -1179,7 +1246,7 @@ int main(int argc, char** argv) {
             }
 
             // Holds total primary path base readings observed (read support * node length).
-            double refReadSupportTotal = 0;
+            Support refReadSupportTotal = std::make_pair(0.0, 0.0);
             // And total bases of material we looked at on the primary path and
             // not this alt
             size_t refBases = 0;
@@ -1238,10 +1305,10 @@ int main(int argc, char** argv) {
             // We divide the read support of stuff passed over by the total
             // bases of stuff passed over to get the average read support for
             // the primary path allele.
-            double refReadSupportAverage = refBases == 0 ? 0 : (double)refReadSupportTotal / refBases;
+            Support refReadSupportAverage = refBases == 0 ? std::make_pair(0.0, 0.0) : refReadSupportTotal / refBases;
             
             // And similarly for the alt
-            double altReadSupportAverage = altBases == 0 ? 0 : (double)altReadSupportTotal / altBases;
+            Support altReadSupportAverage = altBases == 0 ? std::make_pair(0.0, 0.0) : altReadSupportTotal / altBases;
 
             if(refBases == 0) {
                 // There's no reference node; we're a pure insert. Like with
@@ -1261,7 +1328,7 @@ int main(int argc, char** argv) {
                     // Any reads supporting the edge bypassing the insert are
                     // really ref support reads, and should count as supporting
                     // the whole ref allele.
-                    refReadSupportTotal = edgeReadSupport.count(bypass) ? edgeReadSupport.at(bypass) : 0; 
+                    refReadSupportTotal = edgeReadSupport.count(bypass) ? edgeReadSupport.at(bypass) : std::make_pair(0.0, 0.0); 
                     refReadSupportAverage = refReadSupportTotal;
                 }
             }
@@ -1336,18 +1403,18 @@ int main(int argc, char** argv) {
             
             // We're going to make some really bad calls at low depth. We can
             // pull them out with a depth filter, but for now just elide them.
-            if(refReadSupportAverage + altReadSupportAverage >= primaryPathAverageSupport * minFractionForCall) {
-                if(refReadSupportAverage > maxHetBias * altReadSupportAverage &&
-                    refReadSupportTotal >= minTotalSupportForCall) {
+            if(total(refReadSupportAverage + altReadSupportAverage) >= total(primaryPathAverageSupport) * minFractionForCall) {
+                if(total(refReadSupportAverage) > maxHetBias * total(altReadSupportAverage) &&
+                    total(refReadSupportTotal) >= minTotalSupportForCall) {
                     // Biased enough towards ref, and ref has enough total reads.
                     // Say it's hom ref
                     genotype.push_back("0/0");
-                } else if(altReadSupportAverage > maxHetBias * refReadSupportAverage
-                    && altReadSupportTotal >= minTotalSupportForCall) {
+                } else if(total(altReadSupportAverage) > maxHetBias * total(refReadSupportAverage)
+                    && total(altReadSupportTotal) >= minTotalSupportForCall) {
                     // Say it's hom alt
                     genotype.push_back(std::to_string(altNumber) + "/" + std::to_string(altNumber));
-                } else if(refReadSupportTotal >= minTotalSupportForCall &&
-                    altReadSupportTotal >= minTotalSupportForCall) {
+                } else if(total(refReadSupportTotal) >= minTotalSupportForCall &&
+                    total(altReadSupportTotal) >= minTotalSupportForCall) {
                     // Say it's het
                     genotype.push_back("0/" + std::to_string(altNumber));
                 } else {
@@ -1362,15 +1429,22 @@ int main(int argc, char** argv) {
             // TODO: use legit thresholds here.
             
             // Add depth for the variant and the samples
-            std::string depthString = std::to_string((int64_t)round(refReadSupportAverage + altReadSupportAverage));
+            std::string depthString = std::to_string((int64_t)round(total(refReadSupportAverage + altReadSupportAverage)));
             variant.format.push_back("DP");
             variant.samples[sampleName]["DP"].push_back(depthString);
             variant.info["DP"].push_back(depthString); // We only have one sample, so variant depth = sample depth
             
             // Also allelic depths
             variant.format.push_back("AD");
-            variant.samples[sampleName]["AD"].push_back(std::to_string((int64_t)round(refReadSupportAverage)));
-            variant.samples[sampleName]["AD"].push_back(std::to_string((int64_t)round(altReadSupportAverage)));
+            variant.samples[sampleName]["AD"].push_back(std::to_string((int64_t)round(total(refReadSupportAverage))));
+            variant.samples[sampleName]["AD"].push_back(std::to_string((int64_t)round(total(altReadSupportAverage))));
+            
+            // Also strand biases
+            variant.format.push_back("SB");
+            variant.samples[sampleName]["SB"].push_back(std::to_string((int64_t)round(refReadSupportAverage.first)));
+            variant.samples[sampleName]["SB"].push_back(std::to_string((int64_t)round(refReadSupportAverage.second)));
+            variant.samples[sampleName]["SB"].push_back(std::to_string((int64_t)round(altReadSupportAverage.first)));
+            variant.samples[sampleName]["SB"].push_back(std::to_string((int64_t)round(altReadSupportAverage.second)));
             
             
 #ifdef debug
@@ -1480,7 +1554,7 @@ int main(int argc, char** argv) {
         
         // Guess the copy number of the deletion.
         // Holds total base copies (node length * read support) observed as not deleted.
-        double refReadSupportTotal = 0;
+        Support refReadSupportTotal = std::make_pair(0.0, 0.0);
         int64_t deletedNodeStart = fromBase + 1;
         while(deletedNodeStart != toBase) {
 #ifdef debug
@@ -1496,19 +1570,21 @@ int main(int argc, char** argv) {
             // Count the read observations we see not deleted
             refReadSupportTotal += deletedNode->sequence().size() * nodeReadSupport.at(deletedNode);
             
-            // Add the beginning of this node as a see also. The deletion is
-            // stored at the beginning of the first node, and the other
-            // locations will help us get an idea of how much support the
-            // deleted stuff has.
-            crossreferences.insert(nodeSources.at(deletedNode));
+            if(nodeSources.count(deletedNode)) {
+                // Add the beginning of this node as a see also. The deletion is
+                // stored at the beginning of the first node, and the other
+                // locations will help us get an idea of how much support the
+                // deleted stuff has.
+                crossreferences.insert(nodeSources.at(deletedNode));
+            }
         }
         
         // We divide the total read support by the total bases deleted to get
         // the average read support for the reference.
-        double refReadSupportAverage = (double)refReadSupportTotal / (toBase - fromBase - 1);
+        Support refReadSupportAverage = refReadSupportTotal / (toBase - fromBase - 1);
         
         // Get the support for the edge itself?
-        size_t altReadSupportTotal = edgeReadSupport.count(deletion) ? edgeReadSupport[deletion] : 0;
+        Support altReadSupportTotal = edgeReadSupport.count(deletion) ? edgeReadSupport[deletion] : std::make_pair(0.0, 0.0);
         
         // No sense averaging the deletion edge read support because there are no bases.
         
@@ -1518,17 +1594,17 @@ int main(int argc, char** argv) {
         
         // We're going to make some really bad calls at low depth. We can
         // pull them out with a depth filter, but for now just elide them.
-        if(refReadSupportAverage + altReadSupportTotal >= primaryPathAverageSupport * minFractionForCall) {
-            if(refReadSupportAverage > maxHetBias * altReadSupportTotal &&
-                refReadSupportTotal >= minTotalSupportForCall) {
+        if(total(refReadSupportAverage + altReadSupportTotal) >= total(primaryPathAverageSupport) * minFractionForCall) {
+            if(total(refReadSupportAverage) > maxHetBias * total(altReadSupportTotal) &&
+                total(refReadSupportTotal) >= minTotalSupportForCall) {
                 // Say it's hom ref
                 copyNumberCall = 0;
-            } else if(altReadSupportTotal > maxHetBias * refReadSupportAverage &&
-                altReadSupportTotal >= minTotalSupportForCall) {
+            } else if(total(altReadSupportTotal) > maxHetBias * total(refReadSupportAverage) &&
+                total(altReadSupportTotal) >= minTotalSupportForCall) {
                 // Say it's hom alt
                 copyNumberCall = 2;
-            } else if(refReadSupportTotal >= minTotalSupportForCall &&
-                altReadSupportTotal >= minTotalSupportForCall) {
+            } else if(total(refReadSupportTotal) >= minTotalSupportForCall &&
+                total(altReadSupportTotal) >= minTotalSupportForCall) {
                 // Say it's het
                 copyNumberCall = 1;
             } else {
@@ -1607,15 +1683,23 @@ int main(int argc, char** argv) {
         }
         
         // Add depth for the variant and the samples
-        std::string depthString = std::to_string((int64_t)round(refReadSupportAverage + altReadSupportTotal));
-        variant.format.push_back("DP");
-        variant.samples[sampleName]["DP"].push_back(depthString);
-        variant.info["DP"].push_back(depthString); // We only have one sample, so variant depth = sample depth
-        
-        // Also allelic depths
-        variant.format.push_back("AD");
-        variant.samples[sampleName]["AD"].push_back(std::to_string((int64_t)round(refReadSupportAverage)));
-        variant.samples[sampleName]["AD"].push_back(std::to_string(altReadSupportTotal));
+            std::string depthString = std::to_string((int64_t)round(total(refReadSupportAverage + altReadSupportTotal)));
+            variant.format.push_back("DP");
+            variant.samples[sampleName]["DP"].push_back(depthString);
+            variant.info["DP"].push_back(depthString); // We only have one sample, so variant depth = sample depth
+            
+            // Also allelic depths
+            variant.format.push_back("AD");
+            variant.samples[sampleName]["AD"].push_back(std::to_string((int64_t)round(total(refReadSupportAverage))));
+            variant.samples[sampleName]["AD"].push_back(std::to_string((int64_t)round(total(altReadSupportTotal))));
+            
+            // Also strand biases
+            variant.format.push_back("SB");
+            variant.samples[sampleName]["SB"].push_back(std::to_string((int64_t)round(refReadSupportAverage.first)));
+            variant.samples[sampleName]["SB"].push_back(std::to_string((int64_t)round(refReadSupportAverage.second)));
+            variant.samples[sampleName]["SB"].push_back(std::to_string((int64_t)round(altReadSupportTotal.first)));
+            variant.samples[sampleName]["SB"].push_back(std::to_string((int64_t)round(altReadSupportTotal.second)));
+            
         
 #ifdef debug
         std::cerr << "Found variant " << refAllele << " -> " << altAllele
