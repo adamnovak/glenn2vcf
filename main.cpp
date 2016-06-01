@@ -130,6 +130,8 @@ void write_vcf_header(std::ostream& stream, std::string& sample_name, std::strin
     stream << "##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">" << std::endl;
     stream << "##FORMAT=<ID=AD,Number=.,Type=Integer,Description=\"Allelic depths for the ref and alt alleles in the order listed\">" << std::endl;
     stream << "##FORMAT=<ID=SB,Number=4,Type=Integer,Description=\"Forward and reverse support for ref and alt alleles.\">" << std::endl;
+    // We need this field to stratify on for VCF comparison. The info is in SB but vcfeval can't pull it out
+    stream << "##FORMAT=<ID=XAAD,Number=1,Type=Integer,Description=\"Alt allele read count.\">" << std::endl;
     if(!contig_name.empty()) {
         // Announce the contig as well.
         stream << "##contig=<ID=" << contig_name << ",length=" << contig_size << ">" << std::endl;
@@ -1446,6 +1448,10 @@ int main(int argc, char** argv) {
             variant.samples[sampleName]["SB"].push_back(std::to_string((int64_t)round(altReadSupportAverage.first)));
             variant.samples[sampleName]["SB"].push_back(std::to_string((int64_t)round(altReadSupportAverage.second)));
             
+            // And total alt allele depth
+            variant.format.push_back("XAAD");
+            variant.samples[sampleName]["XAAD"].push_back(std::to_string((int64_t)round(total(altReadSupportAverage))));
+            
             
 #ifdef debug
             std::cerr << "Found variant " << refAllele << " -> " << altAllele
@@ -1700,6 +1706,9 @@ int main(int argc, char** argv) {
             variant.samples[sampleName]["SB"].push_back(std::to_string((int64_t)round(altReadSupportTotal.first)));
             variant.samples[sampleName]["SB"].push_back(std::to_string((int64_t)round(altReadSupportTotal.second)));
             
+            // And total alt allele depth
+            variant.format.push_back("XAAD");
+            variant.samples[sampleName]["XAAD"].push_back(std::to_string((int64_t)round(total(altReadSupportTotal))));
         
 #ifdef debug
         std::cerr << "Found variant " << refAllele << " -> " << altAllele
