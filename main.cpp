@@ -249,10 +249,11 @@ size_t bp_length(const std::list<vg::NodeTraversal>& path) {
 /**
  * Do a breadth-first search left from the given node traversal, and return
  * lengths and paths starting at the given node and ending on the indexed
- * reference path.
+ * reference path. Refuses to visit nodes with no support.
  */
 std::set<std::pair<size_t, std::list<vg::NodeTraversal>>> bfs_left(vg::VG& graph,
-    vg::NodeTraversal node, const ReferenceIndex& index, int64_t maxDepth = 10,
+    vg::NodeTraversal node, const ReferenceIndex& index,
+    const std::map<vg::Node*, Support>& nodeReadSupport, int64_t maxDepth = 10,
     bool stopIfVisited = false) {
 
     // Holds partial paths we want to return, with their lengths in bp.
@@ -320,9 +321,17 @@ std::set<std::pair<size_t, std::list<vg::NodeTraversal>>> bfs_left(vg::VG& graph
             for(auto prevNode : prevNodes) {
                 // For each node we can get to
                 
+                if(!nodeReadSupport.empty() && (!nodeReadSupport.count(prevNode.node) ||
+                    total(nodeReadSupport.at(prevNode.node)) == 0)) {
+                    
+                    // We have no support at all for visiting this node (but we
+                    // do have some node read support data)
+                    continue;
+                }
+                
                 if(stopIfVisited && alreadyQueued.count(prevNode)) {
                     // We already have a way to get here.
-                    break;
+                    continue;
                 }
             
                 // Make a new path extended left with the node
@@ -355,11 +364,12 @@ vg::NodeTraversal flip(vg::NodeTraversal toFlip) {
  * reference path.
  */
 std::set<std::pair<size_t, std::list<vg::NodeTraversal>>> bfs_right(vg::VG& graph,
-    vg::NodeTraversal node, const ReferenceIndex& index, int64_t maxDepth = 10,
+    vg::NodeTraversal node, const ReferenceIndex& index,
+    const std::map<vg::Node*, Support>& nodeReadSupport, int64_t maxDepth = 10,
     bool stopIfVisited = false) {
 
     // Look left from the backward version of the node.
-    auto toConvert = bfs_left(graph, flip(node), index, maxDepth, stopIfVisited);
+    auto toConvert = bfs_left(graph, flip(node), index, nodeReadSupport, maxDepth, stopIfVisited);
     
     // Since we can't modify set records in place, we need to do a copy
     std::set<std::pair<size_t, std::list<vg::NodeTraversal>>> toReturn;
@@ -392,13 +402,13 @@ std::set<std::pair<size_t, std::list<vg::NodeTraversal>>> bfs_right(vg::VG& grap
  */
 std::vector<vg::NodeTraversal>
 find_bubble(vg::VG& graph, vg::Node* node, const ReferenceIndex& index,
-    int64_t maxDepth = 10) {
+    const std::map<vg::Node*, Support>& nodeReadSupport, int64_t maxDepth = 10) {
 
     // Find paths on both sides, with nodes on the primary path at the outsides
     // and this node in the middle. Returns path lengths and paths in pairs in a
     // set.
-    auto leftPaths = bfs_left(graph, vg::NodeTraversal(node), index, maxDepth);
-    auto rightPaths = bfs_right(graph, vg::NodeTraversal(node), index, maxDepth);
+    auto leftPaths = bfs_left(graph, vg::NodeTraversal(node), index, nodeReadSupport, maxDepth);
+    auto rightPaths = bfs_right(graph, vg::NodeTraversal(node), index, nodeReadSupport, maxDepth);
     
     // Find a combination of two paths which gets us to the reference in a
     // consistent orientation (meaning that when you look at the ending nodes'
@@ -1137,7 +1147,7 @@ int main(int argc, char** argv) {
             // We have copy number on this node.
             
             // Find a path to the primary reference from here
-            auto path = find_bubble(vg, node, index, maxDepth);
+            auto path = find_bubble(vg, node, index, nodeReadSupport, maxDepth);
             
             if(path.empty()) {
                 // We couldn't find a path back to the primary path. Discard
