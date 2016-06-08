@@ -30,7 +30,7 @@ else
 	LDFLAGS:=$(LDFLAGS) -lrt
 endif
 
-all: glenn2vcf
+all: glenn2vcf2
 
 $(LIBSDSL): $(LIBVG)
 
@@ -43,7 +43,7 @@ $(LIBVG):
 
 main.o: $(LIBVG)
 
-glenn2vcf: main.o $(LIBSONLIB) $(VGLIBS) 
+glenn2vcf2: main.o $(LIBSONLIB) $(VGLIBS) 
 	$(CXX) $^ -o $@ $(CXXFLAGS) $(LDFLAGS)
 
 clean:

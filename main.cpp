@@ -247,6 +247,77 @@ size_t bp_length(const std::list<vg::NodeTraversal>& path) {
 }
 
 /**
+ * Given a pair of nodes in order (constituting a superbubble), return unique
+ * traversals through the graph from the first node to the last node.
+ *
+ * The start node must be upstream of the end node in the given orientations,
+ * because we will try to leave the start traversal on its right, to enter the
+ * end traversal on its left.
+ */
+std::vector<std::list<vg::NodeTraversal>> find_alleles(vg::VG& graph,
+    const vg::NodeTraversal& start, const vg::NodeTraversal& end,
+    const std::map<vg::Node*, Support>& nodeReadSupport, int64_t maxDepth = 10) {
+    
+    // Holds paths we want to return.
+    // TODO: does this need to be a set, really?
+    std::vector<std::list<vg::NodeTraversal>> toReturn;
+    
+    // Do a BFS
+    
+    // This holds the paths to extend from
+    std::list<std::list<vg::NodeTraversal>> toExtend;
+    
+    // Start at the start node
+    toExtend.emplace_back(std::list<vg::NodeTraversal> {start});
+    
+    while(!toExtend.empty()) {
+    
+        // Dequeue a path to extend.
+        // Make sure to move out of the list to avoid a useless copy.
+        std::list<vg::NodeTraversal> path(std::move(toExtend.front()));
+        toExtend.pop_front();
+        
+        if(path.back() == end) {
+            // We have finally reached the end!
+            
+            // Say we got to the right place
+            toReturn.emplace_back(std::move(path));
+            
+            // Don't bother looking for extensions, we already got there.
+        } else if(path.size() < maxDepth) {
+            // We haven't hit the end yet, but we also haven't hit the max
+            // depth. Extend with all the possible extensions.
+            
+            // Look right
+            vector<vg::NodeTraversal> nextNodes = graph.nodes_next(path.back());
+            
+            for(auto nextNode : nextNodes) {
+                // For each node we can get to
+                
+                if(!nodeReadSupport.empty() && (!nodeReadSupport.count(nextNode.node) ||
+                    total(nodeReadSupport.at(nextNode.node)) == 0)) {
+                    
+                    // We have no support at all for visiting this node (but we
+                    // do have some node read support data). Don't visit it.
+                    continue;
+                }
+                
+                // Make a new path extended right with the node
+                std::list<vg::NodeTraversal> extended(path);
+                extended.push_back(nextNode);
+                toExtend.emplace_back(std::move(extended));
+            }
+        }
+    }
+    
+    // Return the set of alleles for the bubble, with leading and trailing start
+    // and end traversals.
+    return toReturn;
+    
+    
+}
+
+/**
  * Do a breadth-first search left from the given node traversal, and return
  * lengths and paths starting at the given node and ending on the indexed
  * reference path. Refuses to visit nodes with no support.
@@ -1129,8 +1200,217 @@ int main(int argc, char** argv) {
     // We need to track the bases lost.
     size_t basesLost = 0;
     
-    // TODO: look at every deletion edge and spit out variants for them.
-    // Complain and maybe remember if they don't connect two primary path nodes.
+    // Find the superbubbles. Returns them as start, end IDs.
+    auto superbubbles = vg.get_superbubbles();
+    
+    for(auto startAndEnd : superbubbles) {
+        // Get where the two nodes at the ends of the bubble are in the
+        // reference, and in what orientations they occur
+        
+        std::cerr << "Evaluating superbubble " << startAndEnd.first << " to " << 
+                startAndEnd.second << std::endl;
+        
+        if(!index.byId.count(startAndEnd.first) || !index.byId.count(startAndEnd.second)) {
+            // We aren't anchored to the primary path, so there's not much we
+            // can do.
+            std::cerr << "Superbubble " << startAndEnd.first << " to " << 
+                startAndEnd.second << " is not anchored to the reference on both ends!" << std::endl;
+            // Try the next superbubble
+            continue;
+        }
+        
+        auto startPositionAndOrientation = index.byId.at(startAndEnd.first);     
+        auto endPositionAndOrientation = index.byId.at(startAndEnd.second);
+        
+        if(startPositionAndOrientation.first >= endPositionAndOrientation.first) {
+            // In the wrong order!
+            throw runtime_error("Node " + std::to_string(startAndEnd.first) +
+                " appears after node " + std::to_string(startAndEnd.second));
+        }
+        
+        // Make traversals in the correct orientations for the start and end nodes.
+        vg::NodeTraversal start(vg.get_node(startAndEnd.first), startPositionAndOrientation.second);
+        vg::NodeTraversal end(vg.get_node(startAndEnd.second), endPositionAndOrientation.second);
+        
+        // Look for all the alleles
+        std::vector<std::list<vg::NodeTraversal>> alleles = find_alleles(vg, start, end, nodeReadSupport, maxDepth);
+        
+        // Determine the sequence of the ref allele, by cutting out the right bit of the reference
+        // The position we have stored for this start node is the first
+        // position along the reference at which it occurs. Our bubble
+        // goes forward in the reference, so we must come out of the
+        // opposite end of the node from the one we have stored.
+        auto referenceIntervalStart = index.byId.at(start.node->id()).first +
+            start.node->sequence().size();
+        
+        // The position we have stored for the end node is the first
+        // position it occurs in the reference, and we know we go into
+        // it in a reference-concordant direction, so we must have our
+        // past-the-end position right there.
+        auto referenceIntervalPastEnd = index.byId.at(end.node->id()).first;
+        
+        // Find the reference allele, if it's not already in the alleles we
+        // found. We begin with the start node.
+        std::list<vg::NodeTraversal> refAllele{start};
+        
+        // This tracks where the next node in the ref allele will start
+        int64_t refNodeStart = referenceIntervalStart;
+        while(refNodeStart < referenceIntervalPastEnd) {
+        
+            // Find the reference node starting here or later. Remember that
+            // a variant anchored at its left base to a reference position
+            // may have no node starting right where it starts.
+            auto found = index.byStart.lower_bound(refNodeStart);
+            if(found == index.byStart.end()) {
+                // No reference nodes here! That's a bit weird. But stop the
+                // loop.
+                break;
+            }
+            if((*found).first >= referenceIntervalPastEnd) {
+                // The next reference node we can find is out of the space
+                // being replaced. We're done.
+                break;
+            }
+            
+            // Pull out the reference node we located
+            auto* refNode = (*found).second.node;
+            
+            // Next iteration look where this node ends.
+            refNodeStart = (*found).first + refNode->sequence().size();
+            
+            // Stick the traversal in the allele.
+            refAllele.push_back((*found).second);
+        }
+        // The ref allele will always end with the end node, which we won't find
+        // in the loop.
+        refAllele.push_back(end);
+        
+        for(size_t i = 0; i < alleles.size(); i++) {
+            if(alleles[i] == refAllele) {
+                // Promote the ref allele to position 0
+                std::swap(alleles[0], alleles[i]);
+                break;
+            }
+        }
+        
+        if(alleles[0] != refAllele) {
+            // We didn't manage to find the ref allele in our BFS
+            std::cerr << "Warning! No ref allele found!" << std::endl;
+            basesLost += referenceIntervalPastEnd - referenceIntervalStart;
+            
+            // Skip the rest of the superbubble
+            continue;
+        }
+        
+        // Otherwise we now have the ref allele, which we know falls at index 0,
+        // and some alts.
+        
+        // For each allele, compute sequence and support and length.
+        std::vector<string> alleleSequence(alleles.size());
+        std::vector<Support> alleleSupport(alleles.size());
+        std::vector<size_t> alleleLength(alleles.size());
+        // Also average support
+        std::vector<Support> alleleAverageSupport(alleles.size());
+        
+        // We also record all the IDs involved
+        std::stringstream idStream;
+        
+        // We also need to find the most and second most supported alleles.
+        int64_t mostSupportedAllele = -1;
+        Support mostSupportedAlleleSupport = std::make_pair(0.0, 0.0);
+        
+        int64_t secondMostSupportedAllele = -1;
+        Support secondMostSupportedAlleleSupport = std::make_pair(0.0, 0.0);
+        
+        for(size_t i = 0; i < alleles.size(); i++) {
+            // Copy to a vector for random access, so skipping the first and last nodes is easier.
+            std::vector<vg::NodeTraversal> allele{alleles[i].begin(), alleles[i].end()};
+        
+            // We stream the allele's sequence together
+            std::stringstream seqStream;
+        
+            for(int64_t j = 1; j + 1 < allele.size(); j++) {
+                // For all but the first and last nodes, grab their sequences in
+                // the correct orientation.
+                
+                std::string addedSequence = allele[j].node->sequence();
+            
+                if(allele[j].backward) {
+                    // If the node is traversed backward, we need to flip its sequence.
+                    addedSequence = vg::reverse_complement(addedSequence);
+                }
+                
+                // Stick the sequence
+                seqStream << addedSequence;
+                
+                // Record ID
+                idStream << std::to_string(allele[j].node->id());
+                // And separator
+                idStream << "_";
+                
+                if(nodeReadSupport.count(allele[j].node)) {
+                    // We have read support for this node. Add it in to the total support for the alt.
+                    alleleSupport[i] += allele[j].node->sequence().size() * nodeReadSupport.at(allele[j].node);
+                }
+                
+                // We always need to add in the length of the node to the total
+                // length
+                alleleLength[i] += allele[j].node->sequence().size();
+            }
+            // Finish the allele sequence
+            alleleSequence[i] = seqStream.str();
+            
+            std::cerr << "Allele " << i << ": " << alleleSequence[i] << std::endl;
+            
+            if(allele.size() == 2) {
+                // This is a pure deletion/non-insertion allele. Its support is just the support for its edge.
+                
+                // We want an edge from the end of the left anchoring node to
+                // the start of the right anchoring node.
+                std::pair<vg::NodeSide, vg::NodeSide> edgeWanted = std::make_pair(
+                    vg::NodeSide(allele.front().node->id(), !allele.front().backward),
+                    vg::NodeSide(allele.back().node->id(), allele.back().backward));
+                
+                if(vg.has_edge(edgeWanted)) {
+                    // We found it!
+                    vg::Edge* bypass = vg.get_edge(edgeWanted);
+                    
+                    // Any reads supporting the edge bypassing the insert are
+                    // really ref support reads, and should count as supporting
+                    // the whole ref allele.
+                    alleleSupport[i] = edgeReadSupport.count(bypass) ? edgeReadSupport.at(bypass) : std::make_pair(0.0, 0.0); 
+                    // Hack the allele length to 1 so we average to this value
+                    alleleLength[i] = 1;
+                }
+            }
+            
+            // Compute the average support (total bases of support over length)
+            alleleAverageSupport[i] = alleleSupport[i] / alleleLength[i];
+            
+            if(total(alleleAverageSupport[i]) > total(mostSupportedAlleleSupport)) {
+                // New most supported allele!
+                // Demote the old one
+                secondMostSupportedAllele = mostSupportedAllele;
+                secondMostSupportedAlleleSupport = mostSupportedAlleleSupport;
+                
+                // And replace it
+                mostSupportedAllele = i;
+                mostSupportedAlleleSupport = alleleAverageSupport[i];
+            } else if(total(alleleAverageSupport[i]) > total(secondMostSupportedAlleleSupport)) {
+                // Replace the old secomd most supported allele instead
+                secondMostSupportedAllele = i;
+                secondMostSupportedAlleleSupport = alleleAverageSupport[i];
+            }
+        }
+        
+        // Now we only consider the most and second most supported alleles when
+        // deciding the genotype.
+    
+        // Based on the supports for all the remaining alts, emit a call: hom
+        // ref, het ref/alt, het alt/alt, hom alt
+    }
+    
+    
     
     vg.for_each_node([&](vg::Node* node) {
         // Look at every node in the graph and spit out variants for the ones
