@@ -931,6 +931,10 @@ int main(int argc, char** argv) {
     vg.paths.sort_by_mapping_rank();
     vg.paths.rebuild_mapping_aux();
     
+    // Fix up doubly reversign edges, which upset the sduperbubble-finding
+    // algorithm
+    vg.flip_doubly_reversed_edges();
+    
     if(refPathName.empty()) {
         std:cerr << "Graph has " << vg.paths.size() << " paths to choose from."
             << std::endl;
