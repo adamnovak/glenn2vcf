@@ -1229,8 +1229,10 @@ int main(int argc, char** argv) {
         // Get where the two nodes at the ends of the bubble are in the
         // reference, and in what orientations they occur
         
+#ifdef debug
         std::cerr << "Evaluating superbubble " << startAndEnd.first << " to " << 
                 startAndEnd.second << std::endl;
+#endif
         
         if(!index.byId.count(startAndEnd.first) || !index.byId.count(startAndEnd.second)) {
             // We aren't anchored to the primary path, so there's not much we
@@ -1258,6 +1260,15 @@ int main(int argc, char** argv) {
         
         // Look for all the alleles
         std::vector<std::list<vg::NodeTraversal>> alleles = find_alleles(vg, start, end, nodeReadSupport, maxDepth);
+        
+        if(alleles.size() < 2) {
+            // We don't want to try and emit variants with less than 2 alleles.
+            std::cerr << "Warning! Fewer than 2 alleles at superbubble " << startAndEnd.first << 
+                " to " << startAndEnd.second << std::endl;
+            // Account for dropped bases
+            basesLost += endPositionAndOrientation.first - startPositionAndOrientation.first;
+            continue;
+        }
         
         // Determine the sequence of the ref allele, by cutting out the right bit of the reference
         // The position we have stored for this start node is the first
@@ -1335,6 +1346,8 @@ int main(int argc, char** argv) {
         std::vector<size_t> alleleLength(alleles.size());
         // Also average support
         std::vector<Support> alleleAverageSupport(alleles.size());
+        // We also want to know if any alleles are empty
+        bool haveEmptyAllele = false;
         
         // We also record all the IDs involved
         std::stringstream idStream;
@@ -1384,7 +1397,15 @@ int main(int argc, char** argv) {
             // Finish the allele sequence
             alleleSequence[i] = seqStream.str();
             
+            assert(alleleSequence[i].size() == alleleLength[i]);
+            if(alleleLength[i] == 0) {
+                // Remember that at least one allele is empty (and so we'll have to add a reference-anchoring base)
+                haveEmptyAllele = true;
+            }
+            
+#ifdef debug
             std::cerr << "Allele " << i << ": " << alleleSequence[i] << std::endl;
+#endif
             
             if(allele.size() == 2) {
                 // This is a pure deletion/non-insertion allele. Its support is just the support for its edge.
@@ -1411,7 +1432,7 @@ int main(int argc, char** argv) {
             // Compute the average support (total bases of support over length)
             alleleAverageSupport[i] = alleleSupport[i] / alleleLength[i];
             
-            if(total(alleleAverageSupport[i]) > total(mostSupportedAlleleSupport)) {
+            if(mostSupportedAllele == -1 || total(alleleAverageSupport[i]) > total(mostSupportedAlleleSupport)) {
                 // New most supported allele!
                 // Demote the old one
                 secondMostSupportedAllele = mostSupportedAllele;
@@ -1420,542 +1441,38 @@ int main(int argc, char** argv) {
                 // And replace it
                 mostSupportedAllele = i;
                 mostSupportedAlleleSupport = alleleAverageSupport[i];
-            } else if(total(alleleAverageSupport[i]) > total(secondMostSupportedAlleleSupport)) {
+            } else if(secondMostSupportedAllele == -1 || 
+                total(alleleAverageSupport[i]) > total(secondMostSupportedAlleleSupport)) {
                 // Replace the old secomd most supported allele instead
                 secondMostSupportedAllele = i;
                 secondMostSupportedAlleleSupport = alleleAverageSupport[i];
             }
         }
         
+        // We need to have both of these alleles found.
+        assert(mostSupportedAllele != -1);
+        assert(secondMostSupportedAllele != -1);
+        assert(mostSupportedAllele != secondMostSupportedAllele);
+        
+        if(haveEmptyAllele) {
+            // Apply anchoring bases if ref is empty. We know we won't be
+            // replacing the very first base of the reference, so this is easy.
+            assert(referenceIntervalStart > 0);
+            
+            // Adjust the reference interval start, from which the variant
+            // position is derived
+            referenceIntervalStart--;
+            // Find the base before this variation
+            char anchoringBase = index.sequence[referenceIntervalStart];
+            for(size_t i = 0; i < alleles.size(); i++) {
+                // Extend each allele on the left with the anchoring base.
+                alleleSequence[i].insert(alleleSequence[i].begin(), anchoringBase);
+                alleleLength[i]++;
+            }
+        }
+        
         // Now we only consider the most and second most supported alleles when
         // deciding the genotype.
-    
-        // Based on the supports for all the remaining alts, emit a call: hom
-        // ref, het ref/alt, het alt/alt, hom alt
-    }
-    
-    
-    
-    vg.for_each_node([&](vg::Node* node) {
-        // Look at every node in the graph and spit out variants for the ones
-        // that are non-reference, but for which we can push copy number to the
-        // reference path, greedily.
-    
-        // Ensure this node is nonreference
-        if(index.byId.count(node->id())) {
-            // Skip reference nodes
-            return;
-        }
-        
-        if(total(nodeReadSupport.at(node)) > 0) {
-            // We have copy number on this node.
-            
-            // Find a path to the primary reference from here
-            auto path = find_bubble(vg, node, index, nodeReadSupport, maxDepth);
-            
-            if(path.empty()) {
-                // We couldn't find a path back to the primary path. Discard
-                // this material.
-                basesLost += node->sequence().size();
-                return;
-            }
-            
-            // Turn it into a substitution/insertion
-            
-            // The position we have stored for this start node is the first
-            // position along the reference at which it occurs. Our bubble
-            // goes forward in the reference, so we must come out of the
-            // opposite end of the node from the one we have stored.
-            auto referenceIntervalStart = index.byId.at(path.front().node->id()).first +
-                path.front().node->sequence().size();
-            
-            // The position we have stored for the end node is the first
-            // position it occurs in the reference, and we know we go into
-            // it in a reference-concordant direction, so we must have our
-            // past-the-end position right there.
-            auto referenceIntervalPastEnd = index.byId.at(path.back().node->id()).first;
-            
-            // We'll fill in this stream with all the node sequences we visit on
-            // the path, except for the first and last.
-            std::stringstream altStream;
-            
-            
-            if(referenceIntervalPastEnd - referenceIntervalStart == 0) {
-                // If this is an insert, make sure we have the 1 base before it.
-                
-                // TODO: we should handle an insert at the very beginning
-                assert(referenceIntervalStart > 0);
-                
-                // Budge left and add that character to the alt as well
-                referenceIntervalStart--;
-                altStream << index.sequence[referenceIntervalStart];
-            }
-            
-            // Variants should be reference if most of their bases are
-            // reference, and novel otherwise. A single SNP base on a known
-            // insert should not make it a novel insert.
-            size_t knownAltBases = 0;
-            
-            // How many alt bases are there overall, both known and novel?
-            size_t altBases = 0;
-            
-            // We also need a list of all the alt node IDs for anming the
-            // variant.
-            std::stringstream idStream;
-            
-            // And collections of all the involved node pointers, on both the
-            // ref and alt sides
-            std::set<vg::Node*> refInvolvedNodes;
-            std::set<vg::Node*> altInvolvedNodes;
-            
-            // And we want to know how much read support in total ther alt has
-            // (support * node length)
-            Support altReadSupportTotal = std::make_pair(0.0, 0.0);
-            
-            for(int64_t i = 1; i < path.size() - 1; i++) {
-                // For all but the first and last nodes, grab their sequences in
-                // the correct orientation.
-                
-                std::string addedSequence = path[i].node->sequence();
-            
-                if(path[i].backward) {
-                    // If the node is traversed backward, we need to flip its sequence.
-                    addedSequence = vg::reverse_complement(addedSequence);
-                }
-                
-                // Stick the sequence
-                altStream << addedSequence;
-                
-                // Record ID
-                idStream << std::to_string(path[i].node->id());
-                if(i != path.size() - 2) {
-                    // Add a separator (-2 since the last thing is path is an
-                    // anchoring reference node)
-                    idStream << "_";
-                }
-                
-                // Record involvement
-                altInvolvedNodes.insert(path[i].node);
-                
-                if(nodeReadSupport.count(path[i].node)) {
-                    // We have read support for this node. Add it in to the total support for the alt.
-                    altReadSupportTotal += path[i].node->sequence().size() * nodeReadSupport.at(path[i].node);
-                }
-                
-                if(knownNodes.count(path[i].node)) {
-                    // This is a reference node.
-                    knownAltBases += path[i].node->sequence().size();
-                }
-                // We always need to add in the length of the node to the total
-                // length
-                altBases += path[i].node->sequence().size();
-            }
-
-
-            // Find the primary path nodes that are being skipped over/bypassed
-            
-            // First collect all the IDs of nodes we aren't skipping because
-            // they're in the alt. Don't count those.
-            std::set<int64_t> altIds;
-            for(auto& visit : path) {
-                altIds.insert(visit.node->id());
-            }
-
-            // Holds total primary path base readings observed (read support * node length).
-            Support refReadSupportTotal = std::make_pair(0.0, 0.0);
-            // And total bases of material we looked at on the primary path and
-            // not this alt
-            size_t refBases = 0;
-            int64_t refNodeStart = referenceIntervalStart;
-            
-            while(refNodeStart < referenceIntervalPastEnd) {
-            
-                // Find the reference node starting here or later. Remember that
-                // a variant anchored at its left base to a reference position
-                // may have no node starting right where it starts.
-                auto found = index.byStart.lower_bound(refNodeStart);
-                if(found == index.byStart.end()) {
-                    // No reference nodes here! That's a bit weird. But stop the
-                    // loop.
-                    break;
-                }
-                if((*found).first >= referenceIntervalPastEnd) {
-                    // The next reference node we can find is out of the space
-                    // being replaced. We're done.
-                    break;
-                }
-                
-                // Pull out the reference node we located
-                auto* refNode = (*found).second.node;
-                
-                // Record involvement
-                refInvolvedNodes.insert(refNode);
-            
-                // Next iteration look where this node ends.
-                refNodeStart = (*found).first + refNode->sequence().size();
-            
-                if(altIds.count(refNode->id())) {
-                    // This node is also involved in the alt we did take, so
-                    // skip it. TODO: work out how to deal with shared nodes.
-#ifdef debug
-                    std::cerr << "Node " << refNode->id() << " also used in alt" << std::endl;
-#endif
-                    continue;
-                }
-                
-                // Say we saw these bases, which may or may not have been called present
-                refBases += refNode->sequence().size();
-#ifdef debug
-                std::cerr << "Node " << refNode->id() << " has " << nodeReadSupport.at(refNode) << " copies" << std::endl;
-#endif
-                
-                // Count the bases we see not deleted
-                refReadSupportTotal += refNode->sequence().size() * nodeReadSupport.at(refNode);
-            }
-            
-#ifdef debug
-            std::cerr << idStream.str() << " ref alternative: " << refReadSupportTotal << "/" << refBases
-                << " from " << referenceIntervalStart << " to " << referenceIntervalPastEnd << std::endl;
-#endif
-
-            // We divide the read support of stuff passed over by the total
-            // bases of stuff passed over to get the average read support for
-            // the primary path allele.
-            Support refReadSupportAverage = refBases == 0 ? std::make_pair(0.0, 0.0) : refReadSupportTotal / refBases;
-            
-            // And similarly for the alt
-            Support altReadSupportAverage = altBases == 0 ? std::make_pair(0.0, 0.0) : altReadSupportTotal / altBases;
-
-            if(refBases == 0) {
-                // There's no reference node; we're a pure insert. Like with
-                // deletions, we should look at the edge that bypasses us to see
-                // if there's any support for it.
-                
-                // We eant an edge from the end of the node before us to the
-                // start of the node after us.
-                std::pair<vg::NodeSide, vg::NodeSide> edgeWanted = std::make_pair(
-                    vg::NodeSide(path.front().node->id(), true),
-                    vg::NodeSide(path.back().node->id()));
-                
-                if(vg.has_edge(edgeWanted)) {
-                    // We found it!
-                    vg::Edge* bypass = vg.get_edge(edgeWanted);
-                    
-                    // Any reads supporting the edge bypassing the insert are
-                    // really ref support reads, and should count as supporting
-                    // the whole ref allele.
-                    refReadSupportTotal = edgeReadSupport.count(bypass) ? edgeReadSupport.at(bypass) : std::make_pair(0.0, 0.0); 
-                    refReadSupportAverage = refReadSupportTotal;
-                }
-            }
-            // Otherwise if there's no edge or no support for that edge, the ref support should stay 0.
-            
-            // Make the variant and emit it.
-            std::string refAllele = index.sequence.substr(
-                referenceIntervalStart, referenceIntervalPastEnd - referenceIntervalStart);
-            std::string altAllele = altStream.str();
-            
-            // Make a Variant
-            vcflib::Variant variant;
-            variant.sequenceName = contigName;
-            variant.setVariantCallFile(vcf);
-            variant.quality = 0;
-            variant.position = referenceIntervalStart + 1 + variantOffset;
-            variant.id = idStream.str();
-            
-            if(knownAltBases >= altBases / 2) {
-                // Flag the variant as reference. Don't put in a false entry if
-                // it isn't, because vcflib will spit out the flag anyway...
-                variant.infoFlags["XREF"] = true;
-            }
-            
-            // We need to deduplicate the corss-references, because multiple
-            // involved nodes may cross-reference the same original node and
-            // offset, and because the same original node and offset can be
-            // referenced by both ref and alt paths.
-            std::set<std::pair<int64_t, size_t>> refCrossreferences;
-            std::set<std::pair<int64_t, size_t>> altCrossreferences;
-            std::set<std::pair<int64_t, size_t>> crossreferences;
-            
-            for(auto* node : refInvolvedNodes) {
-                // Every involved node gets its original node:offset recorded as
-                // an XSEE cross-reference.
-                
-                if(nodeSources.count(node)) {
-                    // It has a source. Find it
-                    auto& source = nodeSources.at(node);
-                    // Then add it to be referenced.
-                    refCrossreferences.insert(source);
-                    crossreferences.insert(source);
-                }
-            }
-            for(auto* node : altInvolvedNodes) {
-                // Every involved node gets its original node:offset recorded as
-                // an XSEE cross-reference.
-                
-                if(nodeSources.count(node)) {
-                    // It has a source. Find it
-                    auto& source = nodeSources.at(node);
-                    // Then add it to be referenced.
-                    altCrossreferences.insert(source);
-                    crossreferences.insert(source);
-                }
-            }
-            for(auto& crossreference : crossreferences) {
-                variant.info["XSEE"].push_back(std::to_string(crossreference.first) + ":" +
-                    std::to_string(crossreference.second));
-            }
-            
-            // Initialize the ref allele
-            create_ref_allele(variant, refAllele);
-            
-            // Add the alt allele
-            int altNumber = add_alt_allele(variant, altAllele);
-            
-            // Say we're going to spit out the genotype for this sample.        
-            variant.format.push_back("GT");
-            auto& genotype = variant.samples[sampleName]["GT"];
-            
-            
-            // We're going to make some really bad calls at low depth. We can
-            // pull them out with a depth filter, but for now just elide them.
-            if(total(refReadSupportAverage + altReadSupportAverage) >= total(primaryPathAverageSupport) * minFractionForCall) {
-                if(total(refReadSupportAverage) > maxHetBias * total(altReadSupportAverage) &&
-                    total(refReadSupportTotal) >= minTotalSupportForCall) {
-                    // Biased enough towards ref, and ref has enough total reads.
-                    // Say it's hom ref
-                    genotype.push_back("0/0");
-                } else if(total(altReadSupportAverage) > maxHetBias * total(refReadSupportAverage)
-                    && total(altReadSupportTotal) >= minTotalSupportForCall) {
-                    // Say it's hom alt
-                    genotype.push_back(std::to_string(altNumber) + "/" + std::to_string(altNumber));
-                } else if(total(refReadSupportTotal) >= minTotalSupportForCall &&
-                    total(altReadSupportTotal) >= minTotalSupportForCall) {
-                    // Say it's het
-                    genotype.push_back("0/" + std::to_string(altNumber));
-                } else {
-                    // We can't really call this as anything.
-                    genotype.push_back("./.");
-                }
-            } else {
-                // Depth too low. Say we have no idea.
-                // TODO: elide variant?
-                genotype.push_back("./.");
-            }
-            // TODO: use legit thresholds here.
-            
-            // Add depth for the variant and the samples
-            std::string depthString = std::to_string((int64_t)round(total(refReadSupportAverage + altReadSupportAverage)));
-            variant.format.push_back("DP");
-            variant.samples[sampleName]["DP"].push_back(depthString);
-            variant.info["DP"].push_back(depthString); // We only have one sample, so variant depth = sample depth
-            
-            // Also allelic depths
-            variant.format.push_back("AD");
-            variant.samples[sampleName]["AD"].push_back(std::to_string((int64_t)round(total(refReadSupportAverage))));
-            variant.samples[sampleName]["AD"].push_back(std::to_string((int64_t)round(total(altReadSupportAverage))));
-            
-            // Also strand biases
-            variant.format.push_back("SB");
-            variant.samples[sampleName]["SB"].push_back(std::to_string((int64_t)round(refReadSupportAverage.first)));
-            variant.samples[sampleName]["SB"].push_back(std::to_string((int64_t)round(refReadSupportAverage.second)));
-            variant.samples[sampleName]["SB"].push_back(std::to_string((int64_t)round(altReadSupportAverage.first)));
-            variant.samples[sampleName]["SB"].push_back(std::to_string((int64_t)round(altReadSupportAverage.second)));
-            
-            // And total alt allele depth
-            variant.format.push_back("XAAD");
-            variant.samples[sampleName]["XAAD"].push_back(std::to_string((int64_t)round(total(altReadSupportAverage))));
-            
-            
-#ifdef debug
-            std::cerr << "Found variant " << refAllele << " -> " << altAllele
-                << " caused by nodes " <<  variant.id
-                << " at 1-based reference position " << variant.position
-                << std::endl;
-#endif
-
-            if(can_write_alleles(variant)) {
-                // Output the created VCF variant.
-                std::cout << variant << std::endl;
-                
-                // Output the pileup line, which will be nonempty if we have pileups
-                std::cout << get_pileup_line(nodePileups, refCrossreferences, altCrossreferences);
-            
-            } else {
-                std::cerr << "Variant is too large" << std::endl;
-                // TODO: account for the 1 base we added extra if it was a pure
-                // insert.
-                basesLost += altAllele.size();
-            }
-            
-            
-        }
-        
-        
-    });
-    
-    for(vg::Edge* deletion : deletionEdges) {
-        // Make deletion variants for each deletion edge
-        
-        // Make a string naming the edge
-        std::string edgeName = std::to_string(deletion->from()) +
-            (deletion->from_start() ? "L" : "R") + "->" +
-            std::to_string(deletion->to()) + (deletion->to_end() ? "R" : "L");
-        
-        if(!index.byId.count(deletion->from()) || !index.byId.count(deletion->to())) {
-            // This deletion edge does not cover a reference interval.
-            // TODO: take into account its presence when pushing copy number.
-#ifdef debug
-            std::cerr << "Deletion edge " << edgeName << " does not cover a reference interval. Skipping!" << endl;
-#endif
-            continue;
-        }
-        
-        // Where are we from and to in the reference (leftmost position and
-        // relative orientation)
-        auto& fromPlacement = index.byId.at(deletion->from());
-        auto& toPlacement = index.byId.at(deletion->to());
-        
-#ifdef debug
-        std::cerr << "Node " << deletion->from() << " is at ref position " 
-            << fromPlacement.first << " orientation " << fromPlacement.second << std::endl;
-        std::cerr << "Node " << deletion->to() << " is at ref position "
-            << toPlacement.first << " orientation " << toPlacement.second << std::endl;
-#endif
-        
-        // Are we attached to the reference-relative left or right of our from
-        // base?
-        bool fromFirst = fromPlacement.second != deletion->from_start();
-        
-        // And our to base?
-        bool toLast = toPlacement.second != deletion->to_end();
-        
-        // What base should the from end really be on? This is the non-deleted
-        // base outside the deletion on the from end.
-        int64_t fromBase = fromPlacement.first + (fromFirst ? 0 : vg.get_node(deletion->from())->sequence().size() - 1);
-        
-        // And the to end?
-        int64_t toBase = toPlacement.first + (toLast ? vg.get_node(deletion->to())->sequence().size() - 1 : 0);
-
-        if(toBase <= fromBase) {
-            // Our edge ought to be running backward.
-            if(!(fromFirst && toLast)) {
-                // We're not a proper deletion edge in the backwards spelling
-                // Discard the edge
-                std::cerr << "Improper deletion edge " << edgeName << std::endl;
-                basesLost += toBase - fromBase;
-                continue;
-            } else {
-                // Just invert the from and to bases.
-                std::swap(fromBase, toBase);
-#ifdef debug
-                std::cerr << "Inverted deletion edge " << edgeName << std::endl;
-#endif
-            }
-        } else if(fromFirst || toLast) {
-            // We aren't a proper deletion edge in the forward spelling either.
-            std::cerr << "Improper deletion edge " << edgeName << std::endl;
-            basesLost += fromBase - toBase;
-            continue;
-        }
-        
-        
-        if(toBase <= fromBase + 1) {
-            // No bases were actually deleted. Maybe this is just a normal reference edge.
-            continue;
-        }
-        
-#ifdef debug
-        std::cerr << "Deletion " << edgeName << " bookended by " << fromBase << " and " << toBase << std::endl;
-#endif
-        
-        // What original node:offset places do we care about?
-        std::set<std::pair<int64_t, size_t>> crossreferences;
-        
-        // Guess the copy number of the deletion.
-        // Holds total base copies (node length * read support) observed as not deleted.
-        Support refReadSupportTotal = std::make_pair(0.0, 0.0);
-        int64_t deletedNodeStart = fromBase + 1;
-        while(deletedNodeStart != toBase) {
-#ifdef debug
-            std::cerr << "Next deleted node starts at " << deletedNodeStart << std::endl;
-#endif
-        
-            // Find the deleted node starting here in the reference
-            auto* deletedNode = index.byStart.at(deletedNodeStart).node;
-            // We know the next reference node should start just after this one.
-            // Even if it previously existed in the reference.
-            deletedNodeStart += deletedNode->sequence().size();
-            
-            // Count the read observations we see not deleted
-            refReadSupportTotal += deletedNode->sequence().size() * nodeReadSupport.at(deletedNode);
-            
-            if(nodeSources.count(deletedNode)) {
-                // Add the beginning of this node as a see also. The deletion is
-                // stored at the beginning of the first node, and the other
-                // locations will help us get an idea of how much support the
-                // deleted stuff has.
-                crossreferences.insert(nodeSources.at(deletedNode));
-            }
-        }
-        
-        // We divide the total read support by the total bases deleted to get
-        // the average read support for the reference.
-        Support refReadSupportAverage = refReadSupportTotal / (toBase - fromBase - 1);
-        
-        // Get the support for the edge itself?
-        Support altReadSupportTotal = edgeReadSupport.count(deletion) ? edgeReadSupport[deletion] : std::make_pair(0.0, 0.0);
-        
-        // No sense averaging the deletion edge read support because there are no bases.
-        
-        
-        // What copy number do we call for the deletion?
-        int64_t copyNumberCall = 2;
-        
-        // We're going to make some really bad calls at low depth. We can
-        // pull them out with a depth filter, but for now just elide them.
-        if(total(refReadSupportAverage + altReadSupportTotal) >= total(primaryPathAverageSupport) * minFractionForCall) {
-            if(total(refReadSupportAverage) > maxHetBias * total(altReadSupportTotal) &&
-                total(refReadSupportTotal) >= minTotalSupportForCall) {
-                // Say it's hom ref
-                copyNumberCall = 0;
-            } else if(total(altReadSupportTotal) > maxHetBias * total(refReadSupportAverage) &&
-                total(altReadSupportTotal) >= minTotalSupportForCall) {
-                // Say it's hom alt
-                copyNumberCall = 2;
-            } else if(total(refReadSupportTotal) >= minTotalSupportForCall &&
-                total(altReadSupportTotal) >= minTotalSupportForCall) {
-                // Say it's het
-                copyNumberCall = 1;
-            } else {
-                // We're not biased enough towards either homozygote, but we
-                // don't have enough support for each allele to call het.
-                // TODO: we just don't call
-                copyNumberCall = 0;
-            }
-        } else {
-            // Depth too low. Don't call.
-            copyNumberCall = 0;
-        }
-        // TODO: use legit thresholds here.
-        
-        
-        if(copyNumberCall == 0) {
-            // Actually don't call a deletion
-            continue;
-        }
-        
-        // Now we know fromBase is the last non-deleted base and toBase is the
-        // first non-deleted base. We'll make an alt replacing the first non-
-        // deleted base plus the deletion with just the first non-deleted base.
-        // Rename everything to the same names we were using before.
-        size_t referenceIntervalStart = fromBase;
-        size_t referenceIntervalPastEnd = toBase;
-        
-        // Make the variant and emit it.
-        std::string refAllele = index.sequence.substr(
-            referenceIntervalStart, referenceIntervalPastEnd - referenceIntervalStart);
-        std::string altAllele = index.sequence.substr(referenceIntervalStart, 1);
         
         // Make a Variant
         vcflib::Variant variant;
@@ -1963,70 +1480,112 @@ int main(int argc, char** argv) {
         variant.setVariantCallFile(vcf);
         variant.quality = 0;
         variant.position = referenceIntervalStart + 1 + variantOffset;
-        variant.id = edgeName;
+        variant.id = idStream.str();
+        // Lop off the trailing underscore that we placed after the last node
+        // ID.
+        assert(variant.id.size() > 0);
+        variant.id.pop_back();
         
-        if(knownEdges.count(deletion)) {
-            // Mark it as reference if it is a reference edge. Apparently vcflib
-            // does not check the flag value when serializing, so don't put in a
-            // flase entry if it's not a reference edge.œ
-            variant.infoFlags["XREF"] = true;
-#ifdef debug
-            std::cerr << edgeName << " is a reference deletion" << std::endl;
-#endif
+        // Initialize the ref allele sequence
+        create_ref_allele(variant, alleleSequence[0]);
+        
+        // Add the alt alleles.
+        // Record alt number for the most supported allele.
+        int mostSupportedAlt = 0;
+        if(mostSupportedAllele > 0) {
+            // We need an alt for the most supported allele
+            mostSupportedAlt = add_alt_allele(variant, alleleSequence[mostSupportedAllele]);
         }
+        // Otherwise it's ref
         
-        for(auto& crossreference : crossreferences) {
-            // Add in all the deduplicated cross-references
-            variant.info["XSEE"].push_back(std::to_string(crossreference.first) + ":" +
-                std::to_string(crossreference.second));
+        // And for the second most supported allele.
+        int secondMostSupportedAlt = 0;
+        if(secondMostSupportedAllele > 0) {
+            // We need an alt for the second most supported allele
+            secondMostSupportedAlt = add_alt_allele(variant, alleleSequence[secondMostSupportedAllele]);
         }
-        
-        // Initialize the ref allele
-        create_ref_allele(variant, refAllele);
-        
-        // Add the alt allele
-        int altNumber = add_alt_allele(variant, altAllele);
+        // Otherwise it's ref
         
         // Say we're going to spit out the genotype for this sample.        
         variant.format.push_back("GT");
         auto& genotype = variant.samples[sampleName]["GT"];
         
-        if(copyNumberCall == 1) {
-            // We're allele alt and ref heterozygous.
-            genotype.push_back("0/" + std::to_string(altNumber));
-        } else if(copyNumberCall == 2) {
-            // We're alt homozygous, other overlapping variants notwithstanding.
-            genotype.push_back(std::to_string(altNumber) + "/" + std::to_string(altNumber));
-        } else {
-            // We're something weird
-            throw std::runtime_error("Invalid copy number for deletion: " + std::to_string(copyNumberCall));
-        }
+        // Make some references for convenience
+        auto& majorSupport = alleleAverageSupport[mostSupportedAllele];
+        auto& minorSupport = alleleAverageSupport[secondMostSupportedAllele];
         
-        // Add depth for the variant and the samples
-            std::string depthString = std::to_string((int64_t)round(total(refReadSupportAverage + altReadSupportTotal)));
-            variant.format.push_back("DP");
-            variant.samples[sampleName]["DP"].push_back(depthString);
-            variant.info["DP"].push_back(depthString); // We only have one sample, so variant depth = sample depth
-            
-            // Also allelic depths
-            variant.format.push_back("AD");
-            variant.samples[sampleName]["AD"].push_back(std::to_string((int64_t)round(total(refReadSupportAverage))));
-            variant.samples[sampleName]["AD"].push_back(std::to_string((int64_t)round(total(altReadSupportTotal))));
-            
-            // Also strand biases
-            variant.format.push_back("SB");
-            variant.samples[sampleName]["SB"].push_back(std::to_string((int64_t)round(refReadSupportAverage.first)));
-            variant.samples[sampleName]["SB"].push_back(std::to_string((int64_t)round(refReadSupportAverage.second)));
-            variant.samples[sampleName]["SB"].push_back(std::to_string((int64_t)round(altReadSupportTotal.first)));
-            variant.samples[sampleName]["SB"].push_back(std::to_string((int64_t)round(altReadSupportTotal.second)));
-            
-            // And total alt allele depth
-            variant.format.push_back("XAAD");
-            variant.samples[sampleName]["XAAD"].push_back(std::to_string((int64_t)round(total(altReadSupportTotal))));
+        // We're going to make some really bad calls at low depth. We can
+        // pull them out with a depth filter, but for now just elide them.
+        if(total(majorSupport + minorSupport) >= total(primaryPathAverageSupport) * minFractionForCall) {
+            if(total(majorSupport) > maxHetBias * total(minorSupport) &&
+                total(majorSupport) >= minTotalSupportForCall) {
+                // Biased enough towards major allele, and it has enough total
+                // reads. Say it's hom major
+                genotype.push_back(std::to_string(mostSupportedAlt) + "/" + std::to_string(mostSupportedAlt));
+            } else if(total(majorSupport) >= minTotalSupportForCall &&
+                total(minorSupport) >= minTotalSupportForCall) {
+                // Say it's het
+                genotype.push_back(std::to_string(mostSupportedAlt) + "/" + std::to_string(secondMostSupportedAlt));
+            } else if(total(majorSupport) >= minTotalSupportForCall) {
+                // We have enough for one of the major allele, and not any of
+                // the minor allele, and we can't call it het. Say we have one major allele copy and one... something.
+                genotype.push_back(std::to_string(mostSupportedAlt) + "/.");
+            } else {
+                // We can't really call this as anything.
+                genotype.push_back("./.");
+            }
+        } else {
+            // Depth too low. Say we have no idea.
+            // TODO: elide variant?
+            genotype.push_back("./.");
+        }
+        // TODO: use legit thresholds here.
+        
+        // Add depth for the variant and the samples. It ends up being the total of all the supports.
+        double totalDepth = 0.0;
+        for(auto& support : alleleAverageSupport) {
+            totalDepth += total(support);
+        }
+        std::string depthString = std::to_string((int64_t)round(totalDepth));
+        variant.format.push_back("DP");
+        variant.samples[sampleName]["DP"].push_back(depthString);
+        variant.info["DP"].push_back(depthString); // We only have one sample, so variant depth = sample depth
+        
+        // Also allelic depths for all alleles
+        variant.format.push_back("AD");
+        for(auto& support : alleleAverageSupport) {
+            variant.samples[sampleName]["AD"].push_back(std::to_string((int64_t)round(total(support))));
+        }
+                
+        // Also strand biases
+        // TODO: this is sort of silly for multiallelic sites.
+        // Pick an alt allele, which is the most supported allele unles that's the reference.
+        int altAllele = mostSupportedAllele == 0 ? secondMostSupportedAllele : mostSupportedAllele;
+        variant.format.push_back("SB");
+        variant.samples[sampleName]["SB"].push_back(std::to_string((int64_t)round(alleleAverageSupport[0].first)));
+        variant.samples[sampleName]["SB"].push_back(std::to_string((int64_t)round(alleleAverageSupport[0].second)));
+        variant.samples[sampleName]["SB"].push_back(std::to_string((int64_t)round(alleleAverageSupport[altAllele].first)));
+        variant.samples[sampleName]["SB"].push_back(std::to_string((int64_t)round(alleleAverageSupport[altAllele].second)));
+        
+        // And total alt allele depth
+        // TODO: total minor allele depth?
+        Support altAlleleDepth = std::make_pair(0.0, 0.0);
+        if(mostSupportedAllele != 0) {
+            // Most supported allele involved isn't ref, so add it in.
+            altAlleleDepth += majorSupport;
+        }
+        if(secondMostSupportedAllele != 0) {
+            // Second most supported allele involved isn't ref, so add it in.
+            altAlleleDepth += minorSupport;
+        }
+        // Then report total support for used alt alleles.
+        variant.format.push_back("XAAD");
+        variant.samples[sampleName]["XAAD"].push_back(std::to_string((int64_t)round(total(altAlleleDepth))));
+        
         
 #ifdef debug
         std::cerr << "Found variant " << refAllele << " -> " << altAllele
-            << " caused by edge " <<  variant.id
+            << " caused by nodes " <<  variant.id
             << " at 1-based reference position " << variant.position
             << std::endl;
 #endif
@@ -2034,20 +1593,16 @@ int main(int argc, char** argv) {
         if(can_write_alleles(variant)) {
             // Output the created VCF variant.
             std::cout << variant << std::endl;
-            
-            // Output the pileup line, which will be nonempty if we have pileups
-            // We only have ref crossreferences here. TODO: make the ref and alt
-            // labels make sense for deletions/re-design the way labeling works.
-            std::cout << get_pileup_line(nodePileups, crossreferences, std::set<std::pair<int64_t, size_t>>());
-            
         } else {
             std::cerr << "Variant is too large" << std::endl;
-            // TODO: Drop the anchoring base that doesn't really belong to the
-            // deletion, when we can be consistent with inserts.
-            basesLost += altAllele.size();
+            // TODO: account for the 1 base we added extra if it was a pure
+            // insert.
+            basesLost += alleleLength[mostSupportedAllele] + alleleLength[secondMostSupportedAllele];
         }
-        
     }
+    
+    // This handles all substitutions, inserts, and deletes. No need for special
+    // handling later.
     
     // Announce how much we can't show.
     std::cerr << "Had to drop " << basesLost << " bp of unrepresentable variation." << std::endl;
