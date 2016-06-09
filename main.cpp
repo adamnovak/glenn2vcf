@@ -931,12 +931,12 @@ int main(int argc, char** argv) {
     vg.paths.sort_by_mapping_rank();
     vg.paths.rebuild_mapping_aux();
     
-    // Fix up doubly reversign edges, which upset the sduperbubble-finding
+    // Fix up doubly reversing edges, which upset the sduperbubble-finding
     // algorithm
     vg.flip_doubly_reversed_edges();
     
     if(refPathName.empty()) {
-        std:cerr << "Graph has " << vg.paths.size() << " paths to choose from."
+        std::cerr << "Graph has " << vg.paths.size() << " paths to choose from."
             << std::endl;
         if(vg.paths.size() == 1) {
             // Autodetect the reference path name as the name of the only path
@@ -948,6 +948,27 @@ int main(int argc, char** argv) {
         std::cerr << "Guessed reference path name of " << refPathName
             << std::endl;
     }
+    
+    // Copy the graph and dagify the copy. We need to hold this translation
+    // table from new node ID to old node and relative orientation.
+    map<vg::id_t, pair<vg::id_t, bool>> dagTranslation;
+    vg::VG* dag = new vg::VG(std::move(vg.dagify(1, dagTranslation)));
+    
+    // Find the superbubbles in the DAG
+    std::vector<std::pair<vg::id_t, vg::id_t>> superbubbles = dag->get_superbubbles();
+    
+    for(auto& superbubble : superbubbles) {
+        // Translate them back to the original node ID space.
+        // Relative orientations don't really matter here.
+        superbubble.first = dagTranslation[superbubble.first].first;
+        superbubble.second = dagTranslation[superbubble.second].first;
+    }
+    
+    // Discard the copy.
+    delete dag;
+    dagTranslation.clear();
+    
+    std::cerr << "Graph has " << superbubbles.size() << " superbubbles." << std::endl;
     
     // Follow the reference path and extract indexes we need: index by node ID,
     // index by node start, and the reconstructed path sequence.
@@ -1204,9 +1225,6 @@ int main(int argc, char** argv) {
     // We need to track the bases lost.
     size_t basesLost = 0;
     
-    // Find the superbubbles. Returns them as start, end IDs.
-    auto superbubbles = vg.get_superbubbles();
-    
     for(auto startAndEnd : superbubbles) {
         // Get where the two nodes at the ends of the bubble are in the
         // reference, and in what orientations they occur
@@ -1227,9 +1245,11 @@ int main(int argc, char** argv) {
         auto endPositionAndOrientation = index.byId.at(startAndEnd.second);
         
         if(startPositionAndOrientation.first >= endPositionAndOrientation.first) {
-            // In the wrong order!
-            throw runtime_error("Node " + std::to_string(startAndEnd.first) +
-                " appears after node " + std::to_string(startAndEnd.second));
+            // In the wrong order! Swap them!
+            std::cerr << "Warning: swapping nodes " << startAndEnd.first << 
+                " and " << startAndEnd.second << " in superbubble!" << std::endl;
+            std::swap(startAndEnd.first, startAndEnd.second);
+            std::swap(startPositionAndOrientation, endPositionAndOrientation);
         }
         
         // Make traversals in the correct orientations for the start and end nodes.
