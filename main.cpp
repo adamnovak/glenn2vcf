@@ -954,6 +954,8 @@ int main(int argc, char** argv) {
     map<vg::id_t, pair<vg::id_t, bool>> dagTranslation;
     vg::VG* dag = new vg::VG(std::move(vg.dagify(1, dagTranslation)));
     
+    std::cerr << "Computing superbubbles..." << std::endl;
+    
     // Find the superbubbles in the DAG
     std::vector<std::pair<vg::id_t, vg::id_t>> superbubbles = dag->get_superbubbles();
     
@@ -1265,6 +1267,7 @@ int main(int argc, char** argv) {
             // We don't want to try and emit variants with less than 2 alleles.
             std::cerr << "Warning! Fewer than 2 alleles at superbubble " << startAndEnd.first << 
                 " to " << startAndEnd.second << std::endl;
+            // TODO: we get lots of non-variable superbubbles by default it seems.
             // Account for dropped bases
             basesLost += endPositionAndOrientation.first - startPositionAndOrientation.first;
             continue;
