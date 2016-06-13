@@ -30,7 +30,7 @@ else
 	LDFLAGS:=$(LDFLAGS) -lrt
 endif
 
-all: glenn2vcf2
+all: glenn2vcf
 
 $(LIBSDSL): $(LIBVG)
 
@@ -38,12 +38,12 @@ $(LIBPROTOBUF): $(LIBVG)
 
 $(LIBXG): $(LIBVG)
 
-$(LIBVG):
+$(LIBVG): ekg/vg/src/*
 	cd ekg/vg && . ./source_me.sh && $(MAKE)
 
 main.o: $(LIBVG)
 
-glenn2vcf2: main.o $(LIBSONLIB) $(VGLIBS) 
+glenn2vcf: main.o $(LIBSONLIB) $(VGLIBS) 
 	$(CXX) $^ -o $@ $(CXXFLAGS) $(LDFLAGS)
 
 clean:
