@@ -22,6 +22,17 @@
 // parse it?
 const static int MAX_ALLELE_LENGTH = 4096;
 
+// Minimum log likelihood
+const static double LOG_ZERO = (double)-1e100;
+
+// convert to string using stringstream (to replace to_string when we want sci. notation)
+template <typename T>
+std::string to_string_ss(T val) {
+    stringstream ss;
+    ss << val;
+    return ss.str();
+}
+
 /**
  * Holds indexes of the reference: position to node, node to position and
  * orientation, and the full reference string.
@@ -132,6 +143,8 @@ void write_vcf_header(std::ostream& stream, std::string& sample_name, std::strin
     stream << "##FORMAT=<ID=SB,Number=4,Type=Integer,Description=\"Forward and reverse support for ref and alt alleles.\">" << std::endl;
     // We need this field to stratify on for VCF comparison. The info is in SB but vcfeval can't pull it out
     stream << "##FORMAT=<ID=XAAD,Number=1,Type=Integer,Description=\"Alt allele read count.\">" << std::endl;
+    stream << "##FORMAT=<ID=AL,Number=.,Type=Float,Description=\"Allelic likelihoods for the ref and alt alleles in the order listed\">" << std::endl;
+    
     if(!contig_name.empty()) {
         // Announce the contig as well.
         stream << "##contig=<ID=" << contig_name << ",length=" << contig_size << ">" << std::endl;
@@ -695,6 +708,202 @@ std::string get_pileup_line(const std::map<int64_t, vg::NodePileup>& nodePileups
     }
 }
 
+    std::map<vg::Node*, Support> nodeReadSupport;
+    // And read support for the edges
+    std::map<vg::Edge*, Support> edgeReadSupport;
+    // This holds all the edges that are deletions, by the pointer to the stored
+    // Edge object in the VG graph
+    std::set<vg::Edge*> deletionEdges;
+    
+    // This holds where nodes came from (node and offset) in the original, un-
+    // augmented graph. For pieces of original nodes, this is where the piece
+    // started. For novel nodes, this is where the piece that thois is an
+    // alternative to started.
+    std::map<vg::Node*, std::pair<int64_t, size_t>> nodeSources;
+    
+    // We also need to track what edges and nodes are reference (i.e. already
+    // known)
+    std::set<vg::Node*> knownNodes;
+    std::set<vg::Edge*> knownEdges;
+
+/**
+ * Parse tsv into an internal format, where we track status and copy number
+ * for nodes and edges.
+ */
+void parse_tsv(const std::string& tsvFile,
+               vg::VG& vg,
+               std::map<vg::Node*, Support>& nodeReadSupport,
+               std::map<vg::Edge*, Support>& edgeReadSupport,
+               std::map<vg::Node*, double>& nodeLikelihood,
+               std::map<vg::Edge*, double>& edgeLikelihood,
+               std::set<vg::Edge*>& deletionEdges,
+               std::map<vg::Node*, std::pair<int64_t, size_t>>& nodeSources,
+               std::set<vg::Node*> knownNodes,
+               std::set<vg::Edge*> knownEdges) {
+    
+    // Open up the TSV-file
+    std::ifstream tsvStream(tsvFile);
+
+    // Loop through all the lines
+    std::string line;
+    size_t lineNumber = 0;
+    while(std::getline(tsvStream, line)) {
+        // For each line
+        
+        lineNumber++;
+        
+        if(line == "") {
+            // Skip blank lines
+            continue;
+        }
+        
+        // Make a stringstream to read out tokens
+        std::stringstream tokens(line);
+        
+        // Read the kind of line this is ("N"ode or "E"dge)
+        std::string lineType;
+        tokens >> lineType; 
+        
+        if(lineType == "N") {
+            // This is a line about a node
+            
+            // Read the node ID
+            int64_t nodeId;
+            tokens >> nodeId;
+            
+            if(!vg.has_node(nodeId)) {
+                throw std::runtime_error("Line " + std::to_string(lineNumber) + ": Invalid node: " + std::to_string(nodeId));
+            }
+            
+            // Retrieve the node we're talking about 
+            vg::Node* nodePointer = vg.get_node(nodeId);
+            
+            // What kind of call is it? Could be "U"ncalled, or "R"eference
+            // (i.e. known in the original graph), which we have special
+            // handling for.
+            std::string callType;
+            tokens >> callType;
+                        
+            // Read the read support
+            Support readSupport;
+            int other_support = 0;
+            double likelihood = 0.;
+            if((tokens >> readSupport.first) && (tokens >> readSupport.second) &&
+               (tokens >> other_support) && (tokens >> likelihood)) {
+                // For nodes with the number there, actually process the read support
+            
+#ifdef debug
+                std::cerr << "Line " << std::to_string(lineNumber) << ": Node " << nodeId
+                    << " has read support " << readSupport.first << "," << readSupport.second << endl;
+#endif
+                
+                // Save it
+                nodeReadSupport[nodePointer] = readSupport;
+                nodeLikelihood[nodePointer] = likelihood;
+                
+                if(callType == "R") {
+                    // Note that this is a reference node
+                    knownNodes.insert(nodePointer);
+                }
+            }
+            
+            // Load the original node ID and offset for this node, if present.
+            int64_t originalId;
+            size_t originalOffset;
+            
+            if(tokens >> originalId && tokens >> originalOffset && originalId != 0) {
+                nodeSources[nodePointer] = std::make_pair(originalId, originalOffset);
+            }
+            
+        } else if(lineType == "E") {
+        
+            // Read the edge data
+            std::string edgeDescription;
+            tokens >> edgeDescription;
+            
+            // Split on commas. We'd just iterate the regex iterator ourselves,
+            // but it seems to only split on the first comma if we do that.
+            std::vector<string> parts;
+            std::regex comma_re(",");
+            std::copy(std::sregex_token_iterator(edgeDescription.begin(), edgeDescription.end(), comma_re, -1), std::sregex_token_iterator(), std::back_inserter(parts));
+            
+            // We need the four fields to describe an edge.
+            assert(parts.size() == 4);
+            
+            // Parse the from node
+            int64_t from = std::stoll(parts[0]);
+            // And the from_start flag
+            bool fromStart = std::stoi(parts[1]);
+            // Make a NodeSide for the from side
+            vg::NodeSide fromSide(from, !fromStart);
+            // Parse the to node
+            int64_t to = std::stoll(parts[2]);
+            // And the to_end flag
+            bool toEnd = std::stoi(parts[3]);
+            // Make a NodeSide for the to side
+            vg::NodeSide toSide(to, toEnd);
+            
+            if(!vg.has_edge(std::make_pair(fromSide, toSide))) {
+                // Ensure we really have that edge
+                throw std::runtime_error("Line " + std::to_string(lineNumber) + ": Edge " + edgeDescription + " not in graph.");
+            }
+            
+            // Get the edge
+            vg::Edge* edgePointer = vg.get_edge(std::make_pair(fromSide, toSide));
+            
+            // Parse the mode
+            std::string mode;
+            tokens >> mode;
+            
+            if(mode == "L" || mode == "R") {
+                // This is a deletion edge, or an edge in the primary path that
+                // may describe a nonzero-length deletion.
+#ifdef debug
+                std::cerr << "Line " << std::to_string(lineNumber) << ": Edge "
+                    << edgeDescription << " may describe a deletion." << endl;
+#endif
+
+                // Say it's a deletion
+                deletionEdges.insert(edgePointer);
+                
+                if(mode == "R") {
+                    // The reference edges also get marked as such
+                    knownEdges.insert(edgePointer);
+#ifdef debug
+                    std::cerr << "Line " << std::to_string(lineNumber) << ": Edge "
+                        << edgeDescription << " is reference." << endl;
+#endif
+                }
+
+            }
+            
+            // Read the read support
+            Support readSupport;
+            int other_support;
+            double likelihood;
+            if((tokens >> readSupport.first) && (tokens >> readSupport.second) &&
+               (tokens >> other_support) && (tokens >> likelihood)) {
+                // For nodes with the number there, actually process the read support
+            
+#ifdef debug
+                std::cerr << "Line " << std::to_string(lineNumber) << ": Edge " << edgeDescription
+                    << " has read support " << readSupport.first << "," << readSupport.second << endl;
+#endif
+                
+                // Save it
+                edgeReadSupport[edgePointer] = readSupport;
+                edgeLikelihood[edgePointer] = likelihood;
+            }
+        
+        } else {
+            // This is not a real kind of line
+            throw std::runtime_error("Line " + std::to_string(lineNumber) + ": Unknown line type: " + lineType);
+        }
+        
+    }
+    std::cerr << "Loaded " << lineNumber << " lines from " << tsvFile << endl;
+}
+
 void help_main(char** argv) {
     std::cerr << "usage: " << argv[0] << " [options] VGFILE GLENNFILE" << std::endl
         << "Convert a Glenn-format vg graph and variant file pair to a VCF." << std::endl
@@ -876,19 +1085,18 @@ int main(int argc, char** argv) {
     
     // Follow the reference path and extract indexes we need: index by node ID,
     // index by node start, and the reconstructed path sequence.
-    ReferenceIndex index = trace_reference_path(vg, refPathName);
-    
-    // Open up the Glenn-file
-    std::ifstream glennStream(glennFile);
-    
-    // Parse it into an internal format, where we track status and copy number
-    // for nodes and edges.
+    ReferenceIndex index = trace_reference_path(vg, refPathName);  
     
     // This holds read support, on each strand, for all the nodes we have read
     // support provided for, by the node pointer in the vg graph.
     std::map<vg::Node*, Support> nodeReadSupport;
     // And read support for the edges
     std::map<vg::Edge*, Support> edgeReadSupport;
+    // This maps the likelihood passed from the tsv to the nodes and edges
+    // (todo: could save some lookups by lumping with supports)
+    std::map<vg::Node*, double> nodeLikelihood;
+    std::map<vg::Edge*, double> edgeLikelihood;
+
     // This holds all the edges that are deletions, by the pointer to the stored
     // Edge object in the VG graph
     std::set<vg::Edge*> deletionEdges;
@@ -903,174 +1111,13 @@ int main(int argc, char** argv) {
     // known)
     std::set<vg::Node*> knownNodes;
     std::set<vg::Edge*> knownEdges;
-    
-    // Loop through all the lines
-    std::string line;
-    size_t lineNumber = 0;
-    while(std::getline(glennStream, line)) {
-        // For each line
-        
-        lineNumber++;
-        
-        if(line == "") {
-            // Skip blank lines
-            continue;
-        }
-        
-        // Make a stringstream to read out tokens
-        std::stringstream tokens(line);
-        
-        // Read the kind of line this is ("N"ode or "E"dge)
-        std::string lineType;
-        tokens >> lineType; 
-        
-        if(lineType == "N") {
-            // This is a line about a node
-            
-            // Read the node ID
-            int64_t nodeId;
-            tokens >> nodeId;
-            
-            if(!vg.has_node(nodeId)) {
-                throw std::runtime_error("Line " + std::to_string(lineNumber) + ": Invalid node: " + std::to_string(nodeId));
-            }
-            
-            // Retrieve the node we're talking about 
-            vg::Node* nodePointer = vg.get_node(nodeId);
-            
-            // What kind of call is it? Could be "U"ncalled, or "R"eference
-            // (i.e. known in the original graph), which we have special
-            // handling for.
-            std::string callType;
-            tokens >> callType;
-            
-            if(callType == "U") {
-                // This node has no called copy number
-#ifdef debug
-                std::cerr << "Line " << std::to_string(lineNumber) << ": Uncalled node: " << nodeId << endl;
-#endif
-                // Put it down as copy number 0 so we don't try and path through
-                // it. TODO: just make the pathing code treat no-CN-stored nodes
-                // as unusable.
-                nodeReadSupport[vg.get_node(nodeId)] = std::make_pair(0.0, 0.0);
 
-            }
-            
-            // Read the read support
-            Support readSupport;
-            if((tokens >> readSupport.first) && (tokens >> readSupport.second)) {
-                // For nodes with the number there, actually process the read support
-            
-#ifdef debug
-                std::cerr << "Line " << std::to_string(lineNumber) << ": Node " << nodeId
-                    << " has read support " << readSupport.first << "," << readSupport.second << endl;
-#endif
-                
-                // Save it
-                nodeReadSupport[nodePointer] = readSupport;
-                
-                if(callType == "R") {
-                    // Note that this is a reference node
-                    knownNodes.insert(nodePointer);
-                }
-            }
-            
-            // Load the original node ID and offset for this node, if present.
-            int64_t originalId;
-            size_t originalOffset;
-            
-            if(tokens >> originalId && tokens >> originalOffset && originalId != 0) {
-                nodeSources[nodePointer] = std::make_pair(originalId, originalOffset);
-            }
-            
-        } else if(lineType == "E") {
+    // Parse tsv into an internal format, where we track status and copy number
+    // for nodes and edges.
+    parse_tsv(glennFile, vg, nodeReadSupport, edgeReadSupport,
+              nodeLikelihood, edgeLikelihood, deletionEdges,
+              nodeSources, knownNodes, knownEdges);
         
-            // Read the edge data
-            std::string edgeDescription;
-            tokens >> edgeDescription;
-            
-            // Split on commas. We'd just iterate the regex iterator ourselves,
-            // but it seems to only split on the first comma if we do that.
-            std::vector<string> parts;
-            std::regex comma_re(",");
-            std::copy(std::sregex_token_iterator(edgeDescription.begin(), edgeDescription.end(), comma_re, -1), std::sregex_token_iterator(), std::back_inserter(parts));
-            
-            // We need the four fields to describe an edge.
-            assert(parts.size() == 4);
-            
-            // Parse the from node
-            int64_t from = std::stoll(parts[0]);
-            // And the from_start flag
-            bool fromStart = std::stoi(parts[1]);
-            // Make a NodeSide for the from side
-            vg::NodeSide fromSide(from, !fromStart);
-            // Parse the to node
-            int64_t to = std::stoll(parts[2]);
-            // And the to_end flag
-            bool toEnd = std::stoi(parts[3]);
-            // Make a NodeSide for the to side
-            vg::NodeSide toSide(to, toEnd);
-            
-            if(!vg.has_edge(std::make_pair(fromSide, toSide))) {
-                // Ensure we really have that edge
-                throw std::runtime_error("Line " + std::to_string(lineNumber) + ": Edge " + edgeDescription + " not in graph.");
-            }
-            
-            // Get the edge
-            vg::Edge* edgePointer = vg.get_edge(std::make_pair(fromSide, toSide));
-            
-            // Parse the mode
-            std::string mode;
-            tokens >> mode;
-            
-            if(mode == "L" || mode == "R") {
-                // This is a deletion edge, or an edge in the primary path that
-                // may describe a nonzero-length deletion.
-#ifdef debug
-                std::cerr << "Line " << std::to_string(lineNumber) << ": Edge "
-                    << edgeDescription << " may describe a deletion." << endl;
-#endif
-
-                // Say it's a deletion
-                deletionEdges.insert(edgePointer);
-                
-                if(mode == "R") {
-                    // The reference edges also get marked as such
-                    knownEdges.insert(edgePointer);
-#ifdef debug
-                    std::cerr << "Line " << std::to_string(lineNumber) << ": Edge "
-                        << edgeDescription << " is reference." << endl;
-#endif
-                }
-
-            }
-            
-            // Read the read support
-            Support readSupport;
-            if((tokens >> readSupport.first) && (tokens >> readSupport.second)) {
-                // For nodes with the number there, actually process the read support
-            
-#ifdef debug
-                std::cerr << "Line " << std::to_string(lineNumber) << ": Edge " << edgeDescription
-                    << " has read support " << readSupport.first << "," << readSupport.second << endl;
-#endif
-                
-                // Save it
-                edgeReadSupport[edgePointer] = readSupport;
-            }
-        
-        } else {
-            // This is not a real kind of line
-            throw std::runtime_error("Line " + std::to_string(lineNumber) + ": Unknown line type: " + lineType);
-        }
-        
-        
-        
-        
-    }
-    
-    std::cerr << "Loaded " << lineNumber << " lines from " << glennFile << endl;
-    
     // Crunch the numbers on the reference and its read support. How much read
     // support in total (node length * aligned reads) does the primary path get?
     Support primaryPathTotalSupport = std::make_pair(0.0, 0.0);
@@ -1195,7 +1242,7 @@ int main(int argc, char** argv) {
             // How many alt bases are there overall, both known and novel?
             size_t altBases = 0;
             
-            // We also need a list of all the alt node IDs for anming the
+            // We also need a list of all the alt node IDs for naming the
             // variant.
             std::stringstream idStream;
             
@@ -1207,6 +1254,11 @@ int main(int argc, char** argv) {
             // And we want to know how much read support in total ther alt has
             // (support * node length)
             Support altReadSupportTotal = std::make_pair(0.0, 0.0);
+
+            // And we keep track of the ref and alt nodes with the lowest likelihoods
+            // (for insertion, we use the bypass edge for the ref likelihood)
+            std::pair<vg::Node*, double> altMinLikelihood(nullptr, LOG_ZERO);
+            std::pair<vg::Node*, double> refMinLikelihood(nullptr, LOG_ZERO);
             
             for(int64_t i = 1; i < path.size() - 1; i++) {
                 // For all but the first and last nodes, grab their sequences in
@@ -1237,7 +1289,15 @@ int main(int argc, char** argv) {
                     // We have read support for this node. Add it in to the total support for the alt.
                     altReadSupportTotal += path[i].node->sequence().size() * nodeReadSupport.at(path[i].node);
                 }
-                
+
+                // Update minimum likelihood in the alt path
+                if(nodeLikelihood.count(path[i].node)) {
+                    double likelihood = nodeLikelihood.at(path[i].node);
+                    if (altMinLikelihood.first == nullptr || likelihood < altMinLikelihood.second) {
+                        altMinLikelihood = make_pair(path[i].node, likelihood);
+                    }
+                }
+                    
                 if(knownNodes.count(path[i].node)) {
                     // This is a reference node.
                     knownAltBases += path[i].node->sequence().size();
@@ -1307,6 +1367,15 @@ int main(int argc, char** argv) {
                 
                 // Count the bases we see not deleted
                 refReadSupportTotal += refNode->sequence().size() * nodeReadSupport.at(refNode);
+
+                // Update minimum likelihood in the ref path
+                if(nodeLikelihood.count(refNode)) {
+                    double likelihood = nodeLikelihood.at(refNode);
+                    if (refMinLikelihood.first == nullptr || likelihood < refMinLikelihood.second) {
+                        refMinLikelihood = make_pair(refNode, likelihood);
+                    }
+                }
+
             }
             
 #ifdef debug
@@ -1342,6 +1411,14 @@ int main(int argc, char** argv) {
                     // the whole ref allele.
                     refReadSupportTotal = edgeReadSupport.count(bypass) ? edgeReadSupport.at(bypass) : std::make_pair(0.0, 0.0); 
                     refReadSupportAverage = refReadSupportTotal;
+
+                    // set minimum likelihood in the ref path using the edge
+                    if(edgeLikelihood.count(bypass)) {
+                        double likelihood = edgeLikelihood.at(bypass);
+                        assert(refMinLikelihood.first == nullptr);
+                        refMinLikelihood = make_pair(nullptr, likelihood);
+                    }
+                    
                 }
             }
             // Otherwise if there's no edge or no support for that edge, the ref support should stay 0.
@@ -1457,10 +1534,16 @@ int main(int argc, char** argv) {
             variant.samples[sampleName]["SB"].push_back(std::to_string((int64_t)round(refReadSupportAverage.second)));
             variant.samples[sampleName]["SB"].push_back(std::to_string((int64_t)round(altReadSupportAverage.first)));
             variant.samples[sampleName]["SB"].push_back(std::to_string((int64_t)round(altReadSupportAverage.second)));
-            
+
             // And total alt allele depth
             variant.format.push_back("XAAD");
             variant.samples[sampleName]["XAAD"].push_back(std::to_string((int64_t)round(total(altReadSupportAverage))));
+
+            // Also allelic likelihoods (from minimum values found on their paths)
+            variant.format.push_back("AL");
+            variant.samples[sampleName]["AL"].push_back(to_string_ss(refMinLikelihood.second));
+            variant.samples[sampleName]["AL"].push_back(to_string_ss(altMinLikelihood.second));
+
             
             
 #ifdef debug
@@ -1571,6 +1654,8 @@ int main(int argc, char** argv) {
         // Guess the copy number of the deletion.
         // Holds total base copies (node length * read support) observed as not deleted.
         Support refReadSupportTotal = std::make_pair(0.0, 0.0);
+        std::pair<vg::Node*, double> refMinLikelihood(NULL, LOG_ZERO);
+        
         int64_t deletedNodeStart = fromBase + 1;
         while(deletedNodeStart != toBase) {
 #ifdef debug
@@ -1585,6 +1670,12 @@ int main(int argc, char** argv) {
             
             // Count the read observations we see not deleted
             refReadSupportTotal += deletedNode->sequence().size() * nodeReadSupport.at(deletedNode);
+
+            // Update minimum node likelihood
+            double likelihood = nodeLikelihood.at(deletedNode);
+            if (refMinLikelihood.first == NULL || likelihood < refMinLikelihood.second) {
+                refMinLikelihood = make_pair(deletedNode, likelihood);
+            }
             
             if(nodeSources.count(deletedNode)) {
                 // Add the beginning of this node as a see also. The deletion is
@@ -1601,7 +1692,7 @@ int main(int argc, char** argv) {
         
         // Get the support for the edge itself?
         Support altReadSupportTotal = edgeReadSupport.count(deletion) ? edgeReadSupport[deletion] : std::make_pair(0.0, 0.0);
-        
+        double altMinLikelihood = edgeLikelihood.count(deletion) ? edgeLikelihood[deletion] : LOG_ZERO;
         // No sense averaging the deletion edge read support because there are no bases.
         
         
@@ -1719,6 +1810,11 @@ int main(int argc, char** argv) {
             // And total alt allele depth
             variant.format.push_back("XAAD");
             variant.samples[sampleName]["XAAD"].push_back(std::to_string((int64_t)round(total(altReadSupportTotal))));
+
+            // Also allelic likelihoods (from minimum values found on their paths)
+            variant.format.push_back("AL");
+            variant.samples[sampleName]["AL"].push_back(to_string_ss(refMinLikelihood.second));
+            variant.samples[sampleName]["AL"].push_back(to_string_ss(altMinLikelihood));
         
 #ifdef debug
         std::cerr << "Found variant " << refAllele << " -> " << altAllele
