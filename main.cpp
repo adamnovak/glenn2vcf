@@ -13,6 +13,7 @@
 #include "ekg/vg/src/index.hpp"
 #include "ekg/vg/deps/vcflib/src/Variant.h"
 
+
 // TODO:
 //  - Decide if we need to have sibling alts detect (somehow) and coordinate with each other
 //  - Parallelize variant generation
@@ -32,6 +33,51 @@ std::string to_string_ss(T val) {
     ss << val;
     return ss.str();
 }
+
+// Poisson utility functions from Freebayes (when merging into vg
+// these should get offloaded into utility.cpp or something
+static long double gammaln(
+    long double x
+    ) {
+
+    long double cofactors[] = { 76.18009173, 
+                                -86.50532033,
+                                24.01409822,
+                                -1.231739516,
+                                0.120858003E-2,
+                                -0.536382E-5 };    
+
+    long double x1 = x - 1.0;
+    long double tmp = x1 + 5.5;
+    tmp -= (x1 + 0.5) * log(tmp);
+    long double ser = 1.0;
+    for (int j=0; j<=5; j++) {
+        x1 += 1.0;
+        ser += cofactors[j]/x1;
+    }
+    long double y =  (-1.0 * tmp + log(2.50662827465 * ser));
+
+    return y;
+}
+
+static long double factorial(
+    int n
+    ) {
+    if (n < 0) {
+        return (long double)0.0;
+    }
+    else if (n == 0) {
+        return (long double)1.0;
+    }
+    else {
+        return exp(gammaln(n + 1.0));
+    }
+}
+
+long double poissonp(int observed, int expected) {
+    return (double) pow((double) expected, (double) observed) * (double) pow(M_E, (double) -expected) / factorial(observed);
+}
+
 
 /**
  * Holds indexes of the reference: position to node, node to position and
@@ -96,7 +142,7 @@ template<typename Scalar>
 Support operator/(const Support& support, const Scalar& scale) {
     return std::make_pair(support.first / scale, support.second / scale);
 }
-
+    
 /**
  * Allow printing a support.
  */
@@ -924,6 +970,8 @@ void help_main(char** argv) {
         << "    -f, --min_fraction  min fraction of average coverage at which to call" << std::endl
         << "    -b, --max_het_bias  max imbalance factor between alts to call heterozygous" << std::endl
         << "    -n, --min_count     min total supporting read count to call a variant" << std::endl
+        << "    -B, --bin_size      bin size used for counting coverage" << std::endl
+        << "    -C, --exp_coverage  specify expected coverage (instead of computing on reference" << std::endl
         << "    -h, --help          print this help message" << std::endl;
 }
 
@@ -965,6 +1013,13 @@ int main(int argc, char** argv) {
     // don't necessarily want to call a SNP as het because we have a single
     // supporting read, even if there are only 10 reads on the site.
     size_t minTotalSupportForCall = 2;
+    // Bin size used for counting coverage along the reference path.  The
+    // bin coverage is used for computing the probability of an allele
+    // of a certain depth
+    size_t refBinSize = 1000;
+    // On some graphs, we can't get the coverage because it's split over
+    // parallel paths.  Allow overriding here
+    size_t expCoverage = 0;
     
     optind = 1; // Start at first real argument
     bool optionsRemaining = true;
@@ -980,13 +1035,15 @@ int main(int argc, char** argv) {
             {"min_fraction", required_argument, 0, 'f'},
             {"max_het_bias", required_argument, 0, 'b'},
             {"min_count", required_argument, 0, 'n'},
+            {"bin_size", required_argument, 0, 'B'},
+            {"avg_coverage", required_argument, 0, 'C'},
             {"help", no_argument, 0, 'h'},
             {0, 0, 0, 0}
         };
 
         int optionIndex = 0;
 
-        char option = getopt_long(argc, argv, "r:c:s:o:d:l:p:f:b:n:h", longOptions, &optionIndex);
+        char option = getopt_long(argc, argv, "r:c:s:o:d:l:p:f:b:n:B:C:h", longOptions, &optionIndex);
         switch(option) {
         // Option value is in global optarg
         case 'r':
@@ -1030,6 +1087,14 @@ int main(int argc, char** argv) {
             // How many reads need to touch an allele before we are willing to
             // call it?
             minTotalSupportForCall = std::stoll(optarg);
+            break;
+        case 'B':
+            // Set the reference bin size
+            refBinSize = std::stoll(optarg);
+            break;
+        case 'C':
+            // Override expected coverage
+            expCoverage = std::stoll(optarg);
             break;
         case -1:
             optionsRemaining = false;
@@ -1117,7 +1182,13 @@ int main(int argc, char** argv) {
     parse_tsv(glennFile, vg, nodeReadSupport, edgeReadSupport,
               nodeLikelihood, edgeLikelihood, deletionEdges,
               nodeSources, knownNodes, knownEdges);
-        
+
+    // Store support binned along reference path;
+    // Last bin extended to include remainder
+    refBinSize = min(refBinSize, index.sequence.size());
+    vector<Support> binnedSupport(max(1, int(index.sequence.size() / refBinSize)),
+                                  Support(expCoverage / 2, expCoverage /2));
+    
     // Crunch the numbers on the reference and its read support. How much read
     // support in total (node length * aligned reads) does the primary path get?
     Support primaryPathTotalSupport = std::make_pair(0.0, 0.0);
@@ -1125,12 +1196,43 @@ int main(int argc, char** argv) {
         if(index.byId.count(pointerAndSupport.first->id())) {
             // This is a primary path node. Add in the total read bases supporting it
             primaryPathTotalSupport += pointerAndSupport.first->sequence().size() * pointerAndSupport.second;
+            
+            // We also update the total for the appropriate bin
+            if (expCoverage == 0) {
+                int bin = index.byId[pointerAndSupport.first->id()].first / refBinSize;
+                if (bin == binnedSupport.size()) {
+                    --bin;
+                }
+                binnedSupport[bin] = binnedSupport[bin] + 
+                    pointerAndSupport.first->sequence().size() * pointerAndSupport.second;
+            }
         }
     }
     // Calculate average support in reads per base
     auto primaryPathAverageSupport = primaryPathTotalSupport / index.sequence.size();
     
+    // Average out the support bins too (in place)
+    int minBin = -1;
+    int maxBin = -1;
+    for (int i = 0; i < binnedSupport.size(); ++i) {
+        if (expCoverage == 0) {
+            binnedSupport[i] = binnedSupport[i] / (
+                i < binnedSupport.size() - 1 ? (double)refBinSize :
+                (double)(refBinSize + index.sequence.size() % refBinSize));
+        }
+        if (minBin == -1 || binnedSupport[i] < binnedSupport[minBin]) {
+            minBin = i;
+        }
+        if (maxBin == -1 || binnedSupport[i] > binnedSupport[maxBin]) {
+            maxBin = i;
+        }
+    }
+        
     std::cerr << "Primary path average coverage: " << primaryPathAverageSupport << endl;
+    std::cerr << "Mininimum binned average coverage: " << binnedSupport[minBin] << " (bin "
+              << (minBin + 1) << " / " << binnedSupport.size() << ")" << endl;
+    std::cerr << "Maxinimum binned average coverage: " << binnedSupport[maxBin] << " (bin "
+              << (maxBin + 1) << " / " << binnedSupport.size() << ")" << endl;
     
     // If applicable, load the pileup.
     // This will hold pileup records by node ID.
@@ -1544,6 +1646,26 @@ int main(int argc, char** argv) {
             variant.samples[sampleName]["AL"].push_back(to_string_ss(refMinLikelihood.second));
             variant.samples[sampleName]["AL"].push_back(to_string_ss(altMinLikelihood.second));
 
+            // Quick quality: combine likelihood and depth, using poisson for latter
+            // todo: revize which depth (cur: avg) / likelihood (cur: min) pair to use
+            int bin = referenceIntervalStart / refBinSize;
+            if (bin == binnedSupport.size()) {
+                --bin;
+            }
+            const Support& baselineSupport = binnedSupport[bin];
+            double genLikelihood;
+            if (genotype.back() == "0/0") {
+                genLikelihood = log10(poissonp(total(refReadSupportAverage), total(baselineSupport)));
+                genLikelihood += refMinLikelihood.second;
+            } else if (genotype.back() == "1/1") {
+                genLikelihood = log10(poissonp(total(altReadSupportAverage), total(baselineSupport)));
+                genLikelihood += altMinLikelihood.second;
+            } else {
+                genLikelihood = log10(poissonp(total(refReadSupportAverage), 0.5 * total(baselineSupport))) +
+                    log10(poissonp(total(altReadSupportAverage), 0.5 * total(baselineSupport)));
+                genLikelihood += refMinLikelihood.second + altMinLikelihood.second;
+            }
+            variant.quality = -10. * log10(1. - exp10(genLikelihood));
             
             
 #ifdef debug
@@ -1751,6 +1873,21 @@ int main(int argc, char** argv) {
         variant.quality = 0;
         variant.position = referenceIntervalStart + 1 + variantOffset;
         variant.id = edgeName;
+
+        if (variant.position == 54675767) {
+            cerr << "ref " << total(refReadSupportAverage) << " alt " << total(altReadSupportTotal)
+                 << " hb " << maxHetBias << " hbcut " << maxHetBias * total(altReadSupportTotal) << endl;
+            if(total(refReadSupportAverage) > maxHetBias * total(altReadSupportTotal) &&
+               total(refReadSupportTotal) >= minTotalSupportForCall) {
+                cerr << "HOM REF " << endl;
+            } else if(total(altReadSupportTotal) > maxHetBias * total(refReadSupportAverage) &&
+                      total(altReadSupportTotal) >= minTotalSupportForCall) {
+                cerr << "HOM ALT " << endl;
+            } else if(total(refReadSupportTotal) >= minTotalSupportForCall &&
+                      total(altReadSupportTotal) >= minTotalSupportForCall) {
+                cerr << " HET " << endl;
+            }
+        }
         
         if(knownEdges.count(deletion)) {
             // Mark it as reference if it is a reference edge. Apparently vcflib
@@ -1815,6 +1952,27 @@ int main(int argc, char** argv) {
             variant.format.push_back("AL");
             variant.samples[sampleName]["AL"].push_back(to_string_ss(refMinLikelihood.second));
             variant.samples[sampleName]["AL"].push_back(to_string_ss(altMinLikelihood));
+
+            // Quick quality: combine likelihood and depth, using poisson for latter
+            // todo: revize which depth (cur: avg) / likelihood (cur: min) pair to use
+            int bin = referenceIntervalStart / refBinSize;
+            if (bin == binnedSupport.size()) {
+                --bin;
+            }
+            const Support& baselineSupport = binnedSupport[bin];
+            double genLikelihood;
+            if (genotype.back() == "0/0") {
+                genLikelihood = log10(poissonp(total(refReadSupportAverage), total(baselineSupport)));
+                genLikelihood += refMinLikelihood.second;
+            } else if (genotype.back() == "1/1") {
+                genLikelihood = log10(poissonp(total(altReadSupportTotal), total(baselineSupport)));
+                genLikelihood += altMinLikelihood;
+            } else {
+                genLikelihood = log10(poissonp(total(refReadSupportAverage), 0.5 * total(baselineSupport))) +
+                    log10(poissonp(total(altReadSupportTotal), 0.5 * total(baselineSupport)));
+                genLikelihood += refMinLikelihood.second + altMinLikelihood;
+            }
+            variant.quality = -10. * log10(1. - exp10(genLikelihood));
         
 #ifdef debug
         std::cerr << "Found variant " << refAllele << " -> " << altAllele
