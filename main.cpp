@@ -1009,6 +1009,8 @@ int main(int argc, char** argv) {
     // homozygous instead of heterozygous. At infinity, every call will be
     // heterozygous if even one read supports each allele.
     double maxHetBias = 20;
+    // Like above, but applied to ref / alt ratio (instead of alt / ref)
+    double maxRefBias = 20;
     // What's the minimum integer number of reads that must support a call? We
     // don't necessarily want to call a SNP as het because we have a single
     // supporting read, even if there are only 10 reads on the site.
@@ -1595,7 +1597,7 @@ int main(int argc, char** argv) {
             // We're going to make some really bad calls at low depth. We can
             // pull them out with a depth filter, but for now just elide them.
             if(total(refReadSupportAverage + altReadSupportAverage) >= total(primaryPathAverageSupport) * minFractionForCall) {
-                if(total(refReadSupportAverage) > maxHetBias * total(altReadSupportAverage) &&
+                if(total(refReadSupportAverage) > maxRefBias * total(altReadSupportAverage) &&
                     total(refReadSupportTotal) >= minTotalSupportForCall) {
                     // Biased enough towards ref, and ref has enough total reads.
                     // Say it's hom ref
@@ -1824,7 +1826,7 @@ int main(int argc, char** argv) {
         // We're going to make some really bad calls at low depth. We can
         // pull them out with a depth filter, but for now just elide them.
         if(total(refReadSupportAverage + altReadSupportTotal) >= total(primaryPathAverageSupport) * minFractionForCall) {
-            if(total(refReadSupportAverage) > maxHetBias * total(altReadSupportTotal) &&
+            if(total(refReadSupportAverage) > maxRefBias * total(altReadSupportTotal) &&
                 total(refReadSupportTotal) >= minTotalSupportForCall) {
                 // Say it's hom ref
                 copyNumberCall = 0;
@@ -1873,21 +1875,6 @@ int main(int argc, char** argv) {
         variant.quality = 0;
         variant.position = referenceIntervalStart + 1 + variantOffset;
         variant.id = edgeName;
-
-        if (variant.position == 54675767) {
-            cerr << "ref " << total(refReadSupportAverage) << " alt " << total(altReadSupportTotal)
-                 << " hb " << maxHetBias << " hbcut " << maxHetBias * total(altReadSupportTotal) << endl;
-            if(total(refReadSupportAverage) > maxHetBias * total(altReadSupportTotal) &&
-               total(refReadSupportTotal) >= minTotalSupportForCall) {
-                cerr << "HOM REF " << endl;
-            } else if(total(altReadSupportTotal) > maxHetBias * total(refReadSupportAverage) &&
-                      total(altReadSupportTotal) >= minTotalSupportForCall) {
-                cerr << "HOM ALT " << endl;
-            } else if(total(refReadSupportTotal) >= minTotalSupportForCall &&
-                      total(altReadSupportTotal) >= minTotalSupportForCall) {
-                cerr << " HET " << endl;
-            }
-        }
         
         if(knownEdges.count(deletion)) {
             // Mark it as reference if it is a reference edge. Apparently vcflib
