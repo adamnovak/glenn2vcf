@@ -21,7 +21,8 @@
 
 // How many bases may we put in an allele in VCF if we expect GATK to be able to
 // parse it?
-const static int MAX_ALLELE_LENGTH = 4096;
+// 0 means no maximum is enforced.
+const static int MAX_ALLELE_LENGTH = 0;
 
 // Minimum log likelihood
 const static double LOG_ZERO = (double)-1e100;
@@ -270,7 +271,7 @@ int add_alt_allele(vcflib::Variant& variant, const std::string& allele) {
  */
 bool can_write_alleles(vcflib::Variant& variant) {
     for(auto& allele : variant.alleles) {
-        if(allele.size() > MAX_ALLELE_LENGTH) {
+        if(MAX_ALLELE_LENGTH > 0 && allele.size() > MAX_ALLELE_LENGTH) {
             return false;
         }
     }
